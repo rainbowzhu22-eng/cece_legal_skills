@@ -27,6 +27,6 @@
 
 基于 [Cece 原仓](https://github.com/whatcccup/cece_legal_skills) 的 `cd4d86a` 提交开发。安装包只含运行与安装所需文件，不含真实文书、会话、映射文件、测试数据或虚拟环境。ZIP 与 SHA-256 值以 Release 资产及同页说明为准。
 
-`合同脱敏-WorkBuddy-Mac-v1.2.3.zip` 的 SHA-256：`81769d0344e0758bafdb3b25891d2d10340440d7c2f85dd6c737bd4a90363ba0`。
+`Contract-Redactor-WorkBuddy-Mac-v1.2.3.zip` 的 SHA-256：`197ce7c02dc02fdbdc707b1805a9ef8b8cdb96ac03cd1297e611882928e18a29`。
 
 发布验收：7 个 Python 测试文件与 1 个 JS 测试文件通过；从安装包解压的实际程序完成浏览器上传、手工补录、外发 DOCX 导出、独立映射还原、历史记录及扫描 PDF 阻断流程。使用的是虚构文书，导出与还原的正文逐段一致。

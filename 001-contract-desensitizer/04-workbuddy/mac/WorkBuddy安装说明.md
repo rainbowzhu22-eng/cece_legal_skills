@@ -6,7 +6,7 @@
 
 把本 ZIP 发给对方，并请对方将下段话连同 ZIP 一起交给 Mac 版 WorkBuddy：
 
-> 请解压我提供的 `合同脱敏-WorkBuddy-Mac-v1.2.3.zip`，进入解压出的 `workbuddy-mac-bundle` 目录，检查其中的 `WorkBuddy安装说明.md`、`install_macos.sh` 和 `contract-desensitizer-offline/SKILL.md`。在 Mac 上运行一次 `bash install_macos.sh`，按脚本输出处理缺失的 Python 或依赖问题。成功后确认技能位于 `~/.workbuddy/skills/contract-desensitizer-offline`，桌面出现“合同脱敏（WorkBuddy）.app”；双击启动并检查 `http://127.0.0.1:18800/health` 返回 200。请不要把我的合同内容上传到云端，也不要修改包内源码。
+> 请解压我提供的 `Contract-Redactor-WorkBuddy-Mac-v1.2.3.zip`，进入解压出的 `workbuddy-mac-bundle` 目录，检查其中的 `WorkBuddy安装说明.md`、`install_macos.sh` 和 `contract-desensitizer-offline/SKILL.md`。在 Mac 上运行一次 `bash install_macos.sh`，按脚本输出处理缺失的 Python 或依赖问题。成功后确认技能位于 `~/.workbuddy/skills/contract-desensitizer-offline`，桌面出现“合同脱敏（WorkBuddy）.app”；双击启动并检查 `http://127.0.0.1:18800/health` 返回 200。请不要把我的合同内容上传到云端，也不要修改包内源码。
 
 ## 对方日常使用
 
