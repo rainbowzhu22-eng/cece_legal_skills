@@ -119,6 +119,9 @@ SURNAMES = set(
     "宁仇栾暴甘钭厉戎祖武符刘景詹束龙叶幸司韶郜黎蓟薄印宿白怀蒲邰从鄂索咸籍赖卓蔺屠蒙"
     "池乔阴鬱胥能苍双闻莘党翟谭贡劳逄姬申扶堵冉宰郦雍卻璩桑桂濮牛寿通边扈燕冀郏浦尚农"
     "温别庄晏柴瞿阎充慕连茹习宦艾鱼容向古易慎戈廖庾终暨居衡步都耿满弘匡国文寇广禄阙东"
+    # R6 补：常见异体/简写姓（姓氏表偏窄，导致含少见姓氏的姓名整条漏检）。
+    # 「付/代」为高频普通字（付款/代理），本轮不纳入，避免扩大误报面。
+    "闫肖兰覃冼邝"
     "欧殳沃利蔚越夔隆师巩厍聂晁勾敖融冷訾辛阚那简饶空曾毋沙乜养鞠须丰巢关蒯相查后荆红"
     "游竺权逯盖益桓公岳帅缑亢况后有琴梁丘左丘东门商牟佘佴伯赏南宫墨哈谯笪年爱阳佟言福"
 )
@@ -135,7 +138,17 @@ ORG_SUFFIX_STRONG = (
     "大学", "学院", "医院", "银行", "信用社", "合作社", "基金会", "商会", "行业协会",
     "支行", "分行", "营业部",
 )
-ORG_SUFFIX_WEAK = ("事务所", "中心", "研究院", "实验室", "集团", "协会", "学会", "管委会", "办事处", "工作室")
+# O1 修复：补入合同里高频出现、但不带「公司」字样的主体后缀
+#   「大厦」——「上海某某大厦ABCD项目」这类写法；
+#   「个体工商户」——个体户没有「有限公司」后缀，此前整类漏检；
+#   「经营部/商行/门市部/服务中心/工作站/分店/专卖店」——同属无「公司」后缀的经营主体。
+# 这些仍放在**弱后缀**里（置信度低于法定后缀），靠门槛把误报挡在外面。
+# 注意：刻意不收「酒店/宾馆/超市/商场」这类通用名词——「甲方安排酒店住宿」会被
+#      向左扩张成「甲方安排酒店」并误判为机构名，收益不抵风险。
+ORG_SUFFIX_WEAK = ("事务所", "中心", "研究院", "实验室", "集团", "协会", "学会", "管委会", "办事处",
+                   "工作室", "大厦", "个体工商户", "经营部", "商行", "门市部", "服务中心",
+                   "工作站", "分店", "专卖店")
+EN_ORG_SUFFIXES = ("LIMITED", "LTD", "INC", "CORPORATION", "CORP", "LLC", "LLP", "PLC")
 
 # 组织机构名白名单：这些"看起来像机构"的词在合同里是代词/通用表述，不该脱敏
 ORG_STOPWORDS = {
@@ -145,6 +158,44 @@ ORG_STOPWORDS = {
     "债权人", "债务人", "甲方公司", "乙方公司", "开户银行", "收款银行", "付款银行",
     "开户行", "银行账号", "仲裁委员会", "人民法院",
 }
+
+# R7 修复：机构「显式简称定义」的排除名单。
+# 「（下称“附表”）」「（以下简称“初始期限”）」「（以下简称“本协议”）」定义的是
+# 文件 / 条款 / 期限 / 角色，**不是公司**。此前它们会被错记成紧邻某家公司全称的简称，
+# 导致正文里这些词被整片替换成机构占位符、条款指向被改写（实测「附表」被替换 10 次）。
+# 命中即不采纳 —— 宁可漏一个真简称（可由「字号」机制或手动补录兜底），也不把正文改错。
+ORG_ALIAS_STOPWORDS = {
+    # 文件 / 条款
+    "附表", "附件", "附录", "清单", "目录", "正文", "序言", "前言",
+    "本协议", "本合同", "本文件", "本约定", "本订单", "本单据", "补充协议", "主合同",
+    "条款", "约定", "报价单", "订单", "方案", "说明书", "技术方案", "服务方案",
+    # 期限
+    "初始期限", "合同期限", "服务期限", "有效期", "保密期限", "通知期限", "履行期限",
+    "合作期限", "质保期", "保修期", "服务期", "合同期", "合作期",
+    # 角色 / 指代
+    "双方", "各方", "我方", "他方", "客户", "供方", "需方", "买方", "卖方",
+    "发包方", "承包方", "委托方", "受托方", "服务方", "供应商", "采购人", "中标人", "招标人",
+    # 泛化名词
+    "服务", "项目", "产品", "货物", "工程", "工作", "事项", "内容",
+}
+ORG_ALIAS_STOP_RE = re.compile(
+    r"^(?:附[表件录][一二三四五六七八九十\d]*"
+    r"|第[一二三四五六七八九十百\d]+(?:条|款|章|节|部分|阶段)"
+    r"|本[协合文约订单据文].{0,5}"
+    r"|[甲乙丙丁戊]方"
+    r"|.{0,5}(?:期限|有效期|质保期|保修期|服务期|合同期|合作期)"
+    r")$"
+)
+
+
+def _is_nonparty_alias(alt: str) -> bool:
+    """R7：判断「显式简称定义」候选是否其实是文件/条款/期限/角色词，而非公司简称。"""
+    a = (alt or "").strip()
+    if not a:
+        return True
+    if a in ORG_STOPWORDS or a in ORG_ALIAS_STOPWORDS:
+        return True
+    return bool(ORG_ALIAS_STOP_RE.match(a))
 
 # 常见占位符 / 示例值
 PLACEHOLDER_PATTERNS = [
@@ -479,6 +530,12 @@ class Block:
     location: str = ""
     page: Optional[int] = None
     word_boxes: List[WordBox] = field(default_factory=list)
+    # 表格坐标 (表序号, 行序号, grid 起始列, 跨列数)，均从 1 起算；仅 DOCX 表格单元格有值。
+    # 列号是**按 gridSpan 展开后的视觉列**，不是 <w:tc> 的原始序号——表头若横向合并
+    # （如「单价」跨 3 列），按 tc 序号对齐会整体错位（v2 实测「总单价/合价」整列漏检即此因）。
+    # 用途：供「表格感知」的金额识别做**列对齐**——列头写「金额/单价」的那一列，
+    # 其下方每个单元格都按金额处理，不再依赖全文关键词窗口（见 TableAmountDetector）。
+    table_ref: Optional[Tuple[int, int, int, int]] = None
 
     def bbox_for_range(self, start: int, end: int) -> Optional[Tuple[float, float, float, float]]:
         """把块内字符区间合并成一个矩形（PDF 涂黑用）。"""
@@ -500,10 +557,30 @@ class Document:
     blocks: List[Block]
     sha256: str = ""
     warnings: List[str] = field(default_factory=list)
+    unreadable_pages: List[int] = field(default_factory=list)
 
     @property
     def text(self) -> str:
         return "\n".join(b.text for b in self.blocks)
+
+
+class PdfTextLayerError(ValueError):
+    """PDF 正文未完整读取，不能继续作出脱敏结果。"""
+
+
+def require_pdf_text(doc: Document) -> None:
+    if doc.file_type != "pdf":
+        return
+    if not doc.text.strip():
+        raise PdfTextLayerError(
+            "未读取到 PDF 正文文字：该文件可能是扫描件或图片型 PDF。"
+            "当前工具不支持 OCR，请先用本地 OCR 生成文字版 DOCX / TXT，"
+            "或带文字层的 PDF，再上传。这不代表文件没有敏感信息。")
+    if doc.unreadable_pages:
+        pages = "、".join(str(n) for n in doc.unreadable_pages[:20])
+        raise PdfTextLayerError(
+            f"PDF 第 {pages} 页只有图片或解析失败，正文尚未完整读取，已停止处理。"
+            "请先完成这些页面的本地 OCR 或转换后重新上传，不能只依据已读取页面的结果外发。")
 
 
 def _sha256(path: str) -> str:
@@ -531,6 +608,37 @@ def docx_para_text(p) -> str:
         elif tag in (_DOCX_W + "br", _DOCX_W + "cr"):
             out.append("\n")
     return "".join(out)
+
+
+def docx_para_units(p):
+    """返回 (text, units)：text 与 docx_para_text(p) 逐字一致。
+
+    units 与 text 等长，每项为：
+      ('t', w:t 序号, 该节点内字符下标)  —— 真实可写字符；
+      ('keep', 'tab' | 'br')             —— tab/br 折算出的**不可写保留位**。
+
+    用途（R6）：让改写/还原阶段与检测阶段使用**同一套段落文本口径**，
+    消除历史缺陷「检测把 <w:tab/> 折算成空格、改写忽略 tab」造成的偏移错位。
+    改写时保留位原样跳过，故制表符/换行的数量与位置不受替换影响。
+    """
+    parts: List[str] = []
+    units: List[Tuple] = []
+    ti = -1
+    for node in p.iter():
+        tag = node.tag
+        if tag == _DOCX_W + "t":
+            ti += 1
+            s = node.text or ""
+            for j, ch in enumerate(s):
+                parts.append(ch)
+                units.append(("t", ti, j))
+        elif tag == _DOCX_W + "tab":
+            parts.append(" ")
+            units.append(("keep", "tab"))
+        elif tag in (_DOCX_W + "br", _DOCX_W + "cr"):
+            parts.append("\n")
+            units.append(("keep", "br"))
+    return "".join(parts), units
 
 
 def docx_para_targets(doct) -> List[Tuple[str, str, Any]]:
@@ -577,6 +685,65 @@ def docx_para_targets(doct) -> List[Tuple[str, str, Any]]:
     return targets
 
 
+def _table_ref(p) -> Optional[Tuple[int, int, int, int]]:
+    """取段落所在的表格坐标 (表序号, 行序号, grid 起始列, 跨列数)，均 1 起算；不在表格里返回 None。
+
+    列号按 **gridSpan 展开后的视觉列** 计算，而非 <w:tc> 的原始序号：
+    表格常把「单价」等列头横向合并（span=3），第一行因而只有 8 个 <w:tc>、
+    而数据行有 10 个，若按 tc 序号对齐会整体错位——v2 实测「总单价/合价」
+    整列漏检即由此引起。改按 grid 列后，表头与数据行才在同一坐标系里。
+
+    只用于「表格感知」识别（列对齐），不参与 block 顺序，因此不影响改写阶段的
+    block_index 对齐。嵌套表格取最内层。
+    """
+    W = _DOCX_W
+
+    def _nearest(tag: str, node):
+        for anc in node.iterancestors():
+            if anc.tag == tag:
+                return anc
+        return None
+
+    tbl = _nearest(W + "tbl", p)
+    if tbl is None:
+        return None
+    tr = _nearest(W + "tr", p)
+    tc = _nearest(W + "tc", p)
+    if tr is None or tc is None:
+        return None
+    t_idx = r_idx = 0
+    parent = tbl.getparent()
+    if parent is not None:
+        for i, t in enumerate(parent.iterchildren(W + "tbl"), 1):
+            if t is tbl:
+                t_idx = i
+                break
+    for i, r in enumerate(tbl.iterchildren(W + "tr"), 1):
+        if r is tr:
+            r_idx = i
+            break
+    # 沿行内 <w:tc> 累加 gridSpan，得到本单元格的 grid 起始列与跨列数
+    col = 0
+    c_start = c_span = 0
+    for c in tr.iterchildren(W + "tc"):
+        span = 1
+        tcPr = c.find(W + "tcPr")
+        if tcPr is not None:
+            gs = tcPr.find(W + "gridSpan")
+            if gs is not None and gs.get(W + "val"):
+                try:
+                    span = max(1, int(gs.get(W + "val")))
+                except ValueError:
+                    span = 1
+        if c is tc:
+            c_start, c_span = col + 1, span
+            break
+        col += span
+    if not (t_idx and r_idx and c_start):
+        return None
+    return (t_idx, r_idx, c_start, c_span)
+
+
 def extract_docx(path: str, include_headers: bool = True) -> Document:
     try:
         from docx import Document as DocxDocument  # type: ignore
@@ -589,7 +756,11 @@ def extract_docx(path: str, include_headers: bool = True) -> Document:
 
     for kind, loc, p in docx_para_targets(doct):
         text = docx_para_text(p)
-        blocks.append(Block(text=text, block_type=kind, location=loc))
+        blk = Block(text=text, block_type=kind, location=loc)
+        if kind == "table_cell":
+            # 记录表格坐标，供表格感知识别（金额列对齐）使用
+            blk.table_ref = _table_ref(p)
+        blocks.append(blk)
 
     if not blocks:
         raise RuntimeError("文档中没有可提取的文字（可能是空文档或图片型文件）")
@@ -649,6 +820,7 @@ def _build_from_pdfplumber(page, page_no: int) -> Optional[Block]:
 def extract_pdf(path: str) -> Document:
     warnings: List[str] = []
     blocks: List[Block] = []
+    unreadable_pages: List[int] = []
 
     try:
         import pdfplumber  # type: ignore
@@ -663,9 +835,12 @@ def extract_pdf(path: str) -> Document:
                         blk = _build_from_pdfplumber(page, i)
                     except Exception as exc:  # 单页失败不拖垮整体
                         warnings.append(f"第 {i} 页解析异常：{exc}")
+                        unreadable_pages.append(i)
                         blk = None
                     if blk and blk.text.strip():
                         blocks.append(blk)
+                    elif i not in unreadable_pages and page.images:
+                        unreadable_pages.append(i)
                 total = len(pdf.pages)
         except Exception as exc:
             raise RuntimeError(f"PDF 解析失败：{exc}")
@@ -689,14 +864,20 @@ def extract_pdf(path: str) -> Document:
             try:
                 t = page.extract_text() or ""
             except Exception:
+                unreadable_pages.append(i)
                 t = ""
             if t.strip():
                 blocks.append(Block(text=t, block_type="page", location=f"第 {i} 页", page=i))
+            elif i not in unreadable_pages and page.images:
+                unreadable_pages.append(i)
 
+    if unreadable_pages:
+        warnings.append("未完整读取第 " + "、".join(str(n) for n in unreadable_pages[:20]) +
+                        " 页：图片页或解析失败，需要先完成 OCR / 转换。未识别不代表没有敏感信息。")
     if not blocks or len("".join(b.text for b in blocks).strip()) < 10:
         warnings.append("未提取到有效文本层：该 PDF 很可能是扫描件/图片型，需要 OCR 后才能识别")
     return Document(source=path, file_type="pdf", blocks=blocks, sha256=_sha256(path),
-                    warnings=warnings)
+                    warnings=warnings, unreadable_pages=unreadable_pages)
 
 
 # ----------------------------------------------------------------- TXT ---------
@@ -743,6 +924,9 @@ class RawMatch:
 class ScanContext:
     nt: NormalizedText
     text: str               # == nt.norm
+    # 原始块列表（与 text 同序）。表格感知识别（TableAmountDetector）靠它拿列对齐信息；
+    # 用 txt/pdf 路径时可为空，此时表格感知检测器自动退化为不产出。
+    blocks: List[Any] = field(default_factory=list)
 
     def before(self, start: int, n: int = 40) -> str:
         return self.text[max(0, start - n):start]
@@ -797,11 +981,20 @@ class RegexDetector:
             if not g:
                 continue
             s, e = m.span(self.spec.group)
-            value = g.strip().strip(self.spec.strip_chars) if self.spec.strip_chars else g.strip()
+            # R8-C2：剥离分两步记账。先按空白剥，再按 spec.strip_chars 剥，
+            # 两段剥离的长度都要从起点右移。原实现只记「空白」那一段 lead，
+            # 一旦 strip_chars 里出现能落在外层的字符（如 EMAIL 前导的 '_'），
+            # lead 会少算，使 e = s + len(value) 整体偏左、末尾若干字符以明文残留。
+            v1 = g.strip()
+            lead = len(g) - len(g.lstrip())
+            if self.spec.strip_chars:
+                v2 = v1.strip(self.spec.strip_chars)
+                lead += len(v1) - len(v1.lstrip(self.spec.strip_chars))
+            else:
+                v2 = v1
+            value = v2
             if not value:
                 continue
-            # 修正剥离前后缀后的区间
-            lead = len(g) - len(g.lstrip())
             s += lead
             e = s + len(value)
 
@@ -832,7 +1025,10 @@ class RegexDetector:
             if self.spec.anti_keywords:
                 bad = ctx.has_kw(s, e, self.spec.anti_keywords, window=12)
                 if bad:
-                    conf -= 0.25
+                    # P3 修复：原扣分 0.25 会把「带关键词 + 命中反关键词」的有效读数
+                    # 从 0.70 直接压到 0.45（门槛 0.5 以下）而整条丢弃。
+                    # 反关键词只应「降权」而非「一票否决」，故降为 0.15。
+                    conf -= 0.15
                     reasons.append(f"疑似非敏感上下文「{bad}」")
 
             conf = max(0.0, min(conf, 0.99))
@@ -855,6 +1051,8 @@ NAME_LABELS = (
     # 角色类（表格行：角色 + 姓名）
     "产品负责人", "业务负责人", "商务负责人", "财务负责人", "内容负责人", "运营负责人",
     "客户负责人", "客户经理", "法务负责人", "法务合规", "艺人商务", "舆情值班",
+    # R6 补：复合标签（已按长度倒序，长标签优先，不遮蔽其中的「代表」「联系人」）
+    "销售代表", "主要联系人", "业务联系人", "账单联系人",
     # 表格列头
     "角色", "人员", "代表",
     # 表单字段
@@ -885,11 +1083,16 @@ _PARTY_LABELS = ("甲方", "乙方", "丙方", "丁方", "戊方")
 _OTHER_LABELS = tuple(x for x in NAME_LABELS if x not in _PARTY_LABELS)
 
 _PAREN = r"(?:\s*[（(【][^)）】]{0,12}[）)】])?"
+# R6：标签与冒号之间可夹角色修饰语（「主要联系人**及职位**：」「授权代表**（姓名）**：」）。
+#     只白名单到固定词，不会吞人名——错位时仍会走后续五道否决（职务词/停用词/姓氏/右边界）。
+_MID = r"(?:\s*(?:及|与|和)?\s*(?:职位|职务|职称|岗位|称呼|姓名|签字|签章|签名))?"
+# R6：标签与姓名之间常是填写线/点线/空白（「联系人：__钱睿____」）。上限 24 位，防跨段误抓。
+_FILLER = r"[_＿．.\-·\s\u00a0\u3000]{0,24}"
 _NAME_LABEL_RE = re.compile(
     "(?:"
-    + "|".join(_PARTY_LABELS) + r")\s*" + _PAREN + r"\s*[：:＝=][ \t]*"      # 当事方：必须有冒号
+    + "|".join(_PARTY_LABELS) + r")\s*" + _PAREN + r"\s*[：:＝=][ \t]*" + _FILLER   # 当事方：必须有冒号
     + "|"
-    + "(?:" + "|".join(_OTHER_LABELS) + r")\s*" + _PAREN + r"\s*[：:＝=]?[ \t]*"  # 其余：冒号可选
+    + "(?:" + "|".join(_OTHER_LABELS) + r")\s*" + _PAREN + r"\s*" + _MID + r"\s*[：:＝=]?[ \t]*" + _FILLER  # 其余：冒号可选
 )
 _NAME_RUN_RE = re.compile(r"[\u4e00-\u9fff]{2,8}(?:·[\u4e00-\u9fff]{1,6})*")
 
@@ -963,15 +1166,40 @@ class PersonNameDetector:
 # ------------------------------------------------------------------------------
 
 ADDR_LABELS = ("通讯地址", "通信地址", "联系地址", "详细地址", "送达地址", "注册地址", "住所地",
-               "住所", "住址", "地址", "经营场所", "所在地", "注册地", "办公地址", "邮寄地址")
-# 标签后可以是 冒号 / 等号 / 换行 / 紧接（合同表格常把标签和地址分两行）
-ADDR_LABEL_RE = re.compile("(?:" + "|".join(ADDR_LABELS) + r")\s*(?:[：:＝=]|\n)\s*")
+               "住所", "住址", "地址", "经营场所", "所在地", "注册地", "办公地址", "邮寄地址",
+               # A2 修复：工程建设 / 服务类合同常用这些字段名，此前不在标签表里，
+               # 导致「工程地点：上海市……」整条走不了标签路径。
+               "工程地点", "施工地点", "项目地点", "服务地点", "履行地点", "交付地点",
+               "交货地点", "履约地点", "项目地址", "施工地址", "办公场所", "经营地址")
+# 标签后可以是 冒号 / 等号 / 换行 / 表格竖线 / 空格制表（合同表格常把标签和值分两列或两行）。
+# A4 修复：原实现只认「冒号｜等号｜换行」，表格两列结构（值前只有空格/竖线）会整条漏检。
+#   strong 组：冒号/等号/换行/竖线——强语法，允许值本身较短；
+#   非 strong（仅空格/制表）：弱语法，要求值里必须出现行政区划或门牌要素，避免误吞整句话。
+ADDR_LABEL_RE = re.compile(
+    "(?:" + "|".join(ADDR_LABELS) + r")\s*"
+    r"(?:(?P<addr_strong>[：:＝=])\s*|[为是]\s*|\n\s*|[|｜]\s*|[ \t]+(?=\S))"
+)
 ADDR_STOP = "，。；、,;；\n\t（）()【】[]：:"
 # 地址后面常紧跟下一个字段名，遇到就截断，避免把整行吞进来
 ADDR_NEXT_FIELD = ("邮编", "邮政编码", "电话", "手机", "邮箱", "电子邮箱", "传真",
                    "联系人", "开户", "账号", "帐号", "税号", "网址", "法定代表人")
 ADDR_COMPONENTS = ("省", "自治区", "市", "区", "县", "旗", "镇", "乡", "村", "路", "街", "道",
                    "巷", "弄", "号", "栋", "幢", "楼", "单元", "室", "层", "号楼", "大院", "园区")
+# R8-C2：地址值两端的「填空线」字符（半角/全角下划线 + 各类空白）。
+# 它们属于「待填位置」的版式，不属于地址本身——替换时若一并覆盖，
+# 落款那一行的填空线会消失、版面被破坏。注意**不能**并入 ADDR_STOP：
+# 标签后紧跟的 '_' 会令向后扫描在起点处立即截断，导致整条地址漏检。
+# 正确做法是「判据用剥前的值（识别行为不变），只把替换区间收紧」。
+ADDR_FILLER_CHARS = "_\uff3f \t\u3000\u00a0\u201c\u201d\u300c\u300d\u300e\u300f\"'"
+
+
+def _trim_addr_filler(text: str, s: int, e: int) -> Tuple[int, int]:
+    """把值两端属于填空线的字符排除在替换区间之外（不改变识别判据）。"""
+    while s < e and text[s] in ADDR_FILLER_CHARS:
+        s += 1
+    while e > s and text[e - 1] in ADDR_FILLER_CHARS:
+        e -= 1
+    return s, e
 
 
 class AddressDetector:
@@ -990,34 +1218,92 @@ class AddressDetector:
                     break
                 end += 1
             value = text[start:end].strip()
-            if len(value) < 6:
+            if len(value) < 4:
                 continue
             # 纯数字/纯 ASCII（如「服务器地址：192.168.10.24」）不是住址
             if not re.search(r"[\u4e00-\u9fff]", value):
                 continue
             comps = sum(1 for c in ADDR_COMPONENTS if c in value)
+            has_street = bool(re.search(r"[路街巷道号栋幢楼室层]", value))
+            # A5 修复：原实现要求「值 ≥ 6 字」，短地址被整条跳过。
+            # 现在：≥6 字照收；4~5 字只在同时满足「≥2 个要素 + 含街道/门牌类字」时收，
+            # 以免把「地址：见附件」这类无关指令当成地址。
+            if len(value) < 6 and not (comps >= 2 and has_street):
+                continue
+            # A4 修复配套：弱分隔符（只有空格/制表）时，值里必须真的含地址要素
+            if m.group("addr_strong") is None and comps == 0:
+                continue
             conf = 0.55 + 0.1 * min(comps, 3)
             reasons = [f"地址标签「{m.group(0).strip()}」引导", f"含 {comps} 个行政区划/门牌要素"]
             if re.search(r"\d", value):
                 conf += 0.08
                 reasons.append("含门牌数字")
-            out.append(RawMatch("ADDRESS", start, end, min(conf, 0.95), reasons, value,
+            # R8-C2：判据一律基于剥前的 value（识别行为完全不变），
+            # 只把「替换区间」收紧到不含两端填空线，保住落款版式。
+            s2, e2 = _trim_addr_filler(text, start, end)
+            out.append(RawMatch("ADDRESS", s2, e2, min(conf, 0.95), reasons, text[s2:e2],
                                 {"components": comps}))
 
         # 无标签的显式行政区划串（省/市/区 + 路/街/号）
+        # A1 修复：原实现第一段强制「省|自治区」，直辖市（北京/上海/天津/重庆）
+        #          以及不写省名的地级市裸地址全部漏检。现改为两条并列前缀：
+        #            · 省/自治区 + 市/自治州/地区/盟
+        #            · 任意「市 + 区/县」（覆盖直辖市与「深圳市南山区」这类写法）
         bare = re.compile(
-            r"[\u4e00-\u9fff]{2,7}(?:省|自治区)"
-            r"[\u4e00-\u9fff]{2,10}(?:市|自治州|地区|盟)"
-            r"[\u4e00-\u9fff]{2,20}?"
+            r"(?:"
+            r"[\u4e00-\u9fff]{2,7}(?:省|自治区)[\u4e00-\u9fff]{2,10}(?:市|自治州|地区|盟)"
+            r"|[\u4e00-\u9fff]{2,8}市[\u4e00-\u9fff]{2,10}(?:区|县)"
+            r")"
+            # 这里原先还有一段 `[\u4e00-\u9fff]{2,20}?`。它会和后面的
+            # `{2,30}?` 叠加成「路名前至少 4 个汉字」，于是「示例路」
+            # 这类 3 字路名整条失配。去掉后由 `{2,30}?` 的惰性展开负责吃掉
+            # 「科技园中区」这类中间层级，反而更准。
             r"(?:[\u4e00-\u9fff]{1,12}(?:区|县|市|旗))?"
             r"[\u4e00-\u9fff0-9]{2,30}?(?:路|街|道|巷|弄|大道|园区|工业区)"
             r"[\u4e00-\u9fff0-9\-]{0,20}?(?:号|栋|幢|号楼|室|层)"
         )
+
+        def _trim_left(pattern, s: int, e: int, span: int = 8) -> int:
+            """向左修剪：把「项目位于上海市……」里叙述性的地名前缀剥掉。
+
+            从 s+1 起逐个字符试算，只要仍能匹配到同一结尾就继续右移，
+            第一个失败的位置即行政区划名的真实起点。避免把「项目位于」一起脱敏。
+            """
+            lo = s
+            for i in range(s + 1, min(s + span, e)):
+                m2 = pattern.match(text, i)
+                if m2 and m2.end() == e:
+                    # R11-G4：切点左侧紧邻行政区划名时**不采纳**该切点，否则会把
+                    # 「上海市…」切成「市…」，地名前两字以明文留在正文（真泄漏）。
+                    if not _preceded_by_region_prefix(text, 0, i):
+                        lo = i
+                else:
+                    break
+            return lo
+
         for m in bare.finditer(text):
-            value = m.group(0)
+            s = _trim_left(bare, m.start(), m.end())
+            value = text[s:m.end()]
             conf = 0.6 + 0.05 * sum(1 for c in ADDR_COMPONENTS if c in value)
-            out.append(RawMatch("ADDRESS", m.start(), m.end(), min(conf, 0.92),
+            out.append(RawMatch("ADDRESS", s, m.end(), min(conf, 0.92),
                                 ["显式行政区划+门牌结构"], value))
+
+        # A3 修复：只到「区/县」一级、没有门牌的裸地址（如「上海市浦东新区」）。
+        # 边界收紧（匹配后必须紧跟空白/标点/行尾，不能仍是中文），
+        # 以免把「北京市海淀区人民法院」这类机构名当成地址。
+        bare_admin = re.compile(
+            r"(?:[\u4e00-\u9fff]{2,7}(?:省|自治区))?"
+            r"[\u4e00-\u9fff]{2,8}市"
+            r"[\u4e00-\u9fff]{2,10}(?:区|县)"
+            r"(?=[\s，。；、,;:：|｜\u201c\u201d\u2018\u2019\u300c\u300d\u300e\u300f\uff08\uff09()\u3010\u3011\[\]]|$)"
+        )
+        for m in bare_admin.finditer(text):
+            s = _trim_left(bare_admin, m.start(), m.end())
+            value = text[s:m.end()]
+            if len(value) < 5:
+                continue
+            out.append(RawMatch("ADDRESS", s, m.end(), 0.6,
+                                ["显式行政区划（区/县级，无门牌）"], value))
         return out
 
 
@@ -1028,27 +1314,169 @@ class AddressDetector:
 ORG_BODY_RE = re.compile(r"[\u4e00-\u9fffA-Za-z0-9（）()·&.\-'\"]")
 # 左边界字：向左扩张时，遇到这些字就在此处切断（避免把「本合同由XX公司」整段吞进来）
 ORG_LEFT_BOUNDARY = set("由与和或给被把以并为在及至向从对等第是为向：:，,。;；、（）[]{}<>《》\"' \t\n")
+# R8-A：机构名左扩张使用的「多字虚词 / 角色短语」——其**结束位置**也作为候选切点。
+# 在「取最靠右切点」的规则下，单字边界字会漏掉更靠右的短语切点：
+#   「被告泽远技术…」       → 候选 {被后, 被告后}，取「被告」之后 → 泽远技术…（不再残留「被」）
+#   「…建设的位于宜宾志远…」→ 取「位于」之后 → 宜宾志远…（不再吞掉 8 个字的正文）
+ORG_LEFT_PHRASES: Tuple[str, ...] = (
+    "原告", "被告", "上诉人", "被上诉人", "申请人", "被申请人", "再审申请人",
+    "第三人", "委托代理人", "法定代表人", "法定代理人", "被执行人",
+    "位于", "坐落于", "地址为", "名称为",
+)
+
 # 机构名前残留的指代词/量词（按 2 字一组，便于一次性剔除「本人」「该公」「号院」等错误前缀）
 ORG_LEAD_PRONOUNS = ("本人", "该公司", "该司", "该行", "该店", "该厂", "该社", "该院", "该中心",
                      "其本", "我方", "你方", "对方", "本行", "本院", "本店", "本厂", "本社", "本中心",
                      "号院", "号楼", "号室", "号层", "号店", "号厂", "号楼", "号区")
+
+# R10-B：机构名候选「字号部分」（body = 候选剔除末尾后缀）的反语境词。
+# 背景：后缀锚点 + 全汉字左扩张会把叙述整段吞进来（`部分分公司`、`故建议分公司`、
+#       `最终报送人民银行`），而唯一的长度门槛 len(value)>=5 又把后缀自身算进去了
+#       （`分公司` 白送 3 字、`银行`/`分行` 白送 2 字），于是「左侧任意 2–3 汉字 + 后缀」
+#       即被判为机构名（conf 0.88，永不掉 min_confidence=0.5 门槛）。
+# 判据：候选的 body 中出现反语境词即拒绝。
+# ⚠️ 词表刻意**只收多字词**，并刻意排除以下高风险项：
+#     ① 单字虚词（各/该/由/向/归）——它们会被 `ORG_LEFT_BOUNDARY` 截断或被「剥前缀」规则
+#        剥掉，残留在紧邻位置反而会误杀真名（如「本合同由北京宏远…有限公司」的「由」）；
+#        且这些单字场景本就被 len>=5 门槛挡住（`各分公司` 4 字、`由分公司` 3 字），收录无收益。
+#     ② 「上报」「提交」——「上海报业」含子串「上报」，收进来会误杀真机构名。
+# 故本表宁可小：可回归、可扩展。新增词必须逐词跑 tests/test_org_false_positive.py。
+ORG_ANTI_CONTEXT = (
+    "部分", "根据", "建议", "采用", "报送",
+    "全部", "所有", "其中", "下属",
+)
+
+# R10-C：公权力机关 / 监管机构通用名——不是合同当事人，不含可识别的当事人信息，一律不脱敏。
+# 用户 2026-09-30 口径：`人民银行` 及其同义写法 `中国人民银行` / `人行` / `央行`。
+# ⚠️ 按「**尾匹配**」判定，而非并入 `ORG_STOPWORDS`：后者是**精确匹配**（`value in ORG_STOPWORDS`），
+#    拦不住被左扩张吞长的误报值（如 `最终报送人民银行` ≠ `人民银行`）。
+# ⚠️ `人行` / `央行` 本身不含机构后缀，`ORG_SUFFIX_RE` 不会锚定它们，登记属**防御性**
+#    （防将来新增机构后缀规则时回归）。
+# 取舍：若合同主体确为某人民银行分支机构（如「中国人民银行××市中心支行」），本名单会将其
+#      漏检 —— 与 R7 同口径的「宁漏不错」，可由复核页「添加漏识别的字段」手动补录兜底。
+ORG_NONPARTY_TAILS = (
+    "中国人民银行", "人民银行",
+    "人行", "央行",
+)
+
+
+# R11-F2：机构名「叙述前缀」结构性剥离。
+# 背景：R10-B 的反语境词是**黑名单列举、无法穷举** —— 实测漏挡 `进一步规范` / `促进` /
+#       `通过审阅` / `通过调阅`，叙述被整段吞进候选（conf 0.88，必进复核页），
+#       替换后正文变成「为[组织机构名称#N]反洗钱工作」，**语义被改写**。
+# 判据（结构性，四个条件**全部满足**才重切）：
+#   ① body 里有行政区划名，且**不在开头**（p > 0）；
+#   ② 地名**之前**的片段不含机构后缀（左侧不是另一个机构名，而是叙述）；
+#   ③ 地名**之前**的片段不含括号（括号内地名属字号，如 `宏远档案管理（上海）有限公司`）；
+#   ④ 地名**之前**的片段含叙述词（严护栏；否则视为字号，不重切）。★ 安全关键
+# 动作：把候选**右对齐重切**到该地名处 —— 只切掉前面的叙述，**不拒绝**，真名保留。
+#   为进一步规范上海分公司        → 上海分公司
+#   通过调阅反洗钱系统中上海分公司      → 上海分公司
+#   宏远集团上海分公司           → ②左侧含「集团」→ 不重切，整名保留
+#   泽远技术上海分公司           → ④左侧无叙述词 → 不重切，整名保留（不丢字号）
+#   被告泽远工业技术服务有限公司       → body 无区划名 → 不重切，整名保留
+# 取舍：宁可少覆盖字号，也不误改正文（与 R8-A 同口径）。
+# ⚠ 已知未覆盖（见方案 §6.1）：`组织各分公司` / `督促分公司` / `通过审阅分公司`
+#   这类「叙述 + 后缀、**中间没有地名**」无锚点可切，仍会误报，留待单独一期。
+ORG_NARRATIVE_MARKERS = (
+    "为进一步", "进一步", "通过", "经过", "依据", "根据", "按照", "依照", "遵照",
+    "鉴于", "关于", "针对", "结合", "规范", "促进", "加强", "开展", "推进", "完善",
+    "确保", "落实", "贯彻", "执行", "实施", "履行", "采用", "使用", "运用", "报送",
+    "报请", "审批", "审核", "审阅", "审查", "调阅", "调查", "查询", "核对", "检查",
+    "监督", "评估", "评定", "统计", "汇总", "分析", "研究", "讨论", "确定", "明确",
+    "统一", "分别", "逐项", "全面", "整改", "改进", "优化", "提升", "提高", "强化",
+    "深化", "健全", "建立", "部分", "全部", "所有", "其中", "下属", "所属", "上述",
+    "下列", "有关", "相关", "日常",
+)
+
+
+def _org_region_anchor(body: str) -> int:
+    """body 中**最靠左**的行政区划名前缀起点；无则 -1。"""
+    best = -1
+    for r in ORG_REGION_PREFIXES_SORTED:
+        i = body.find(r)
+        if i >= 0 and (best < 0 or i < best):
+            best = i
+    return best
+
+
+def _org_strip_narrative_prefix(value: str, suffix: str) -> str:
+    """把 body 中「地名之前的叙述」剥离（不满足四个条件时原样返回 value）。"""
+    body = value[:len(value) - len(suffix)]
+    p = _org_region_anchor(body)
+    if p <= 0:
+        return value
+    left = body[:p]
+    # ORG_GENERIC_SUFFIXES 定义在本文件后半段，此处按**调用时**解析（运行期已可用）
+    if any(t in left for t in ORG_GENERIC_SUFFIXES):
+        return value
+    # 括号内的地名是字号的一部分（`宏远档案管理（上海）有限公司`），不是叙述 —— 不重切
+    if "（" in left or "(" in left:
+        return value
+    if not any(mk in left for mk in ORG_NARRATIVE_MARKERS):
+        return value
+    return value[p:]
+
+
+def _is_nonparty_org(value: str) -> bool:
+    """R10-C：候选若以公权力机关通用名结尾，则不是合同当事人，不脱敏。"""
+    v = (value or "").strip()
+    return any(v.endswith(t) for t in ORG_NONPARTY_TAILS)
+
+
 ORG_SUFFIX_RE = re.compile(
     "|".join(re.escape(s) for s in sorted(set(ORG_SUFFIX_STRONG) | set(ORG_SUFFIX_WEAK),
                                           key=len, reverse=True))
 )
+EN_ORG_RE = re.compile(
+    r"(?<![A-Za-z0-9])(?:[A-Z][A-Za-z0-9&.'-]*[ \t]+){1,8}"
+    r"(?:Limited|Ltd\.?|Inc\.?|Corporation|Corp\.?|LLC|LLP|PLC)"
+    r"(?![A-Za-z0-9])"
+)
 _STRONG_SET = set(ORG_SUFFIX_STRONG)
 
 
+def _preceded_by_region_prefix(text: str, start: int, i: int) -> bool:
+    """R8-A：判断位置 i 的单字边界是否「左侧紧邻行政区划前缀」。
+
+    例「广州至诚系统集成有限公司」的「至」——左邻恰是「广州」，属于名字内部用字，
+    不能当作叙述前缀的切点；否则会切出「诚系统集成有限公司」，
+    正文残留明文「广州至」，同时把条款语义改掉。
+    """
+    for p in ORG_REGION_PREFIXES_SORTED:
+        if i - len(p) >= start and text[i - len(p):i] == p:
+            return True
+    return False
+
+
 def _expand_org_left(text: str, end: int) -> Tuple[int, str]:
-    """以「后缀结束位置」为锚点向左扩张出完整机构名。"""
+    """以「后缀结束位置」为锚点向左扩张出完整机构名。
+
+    R8-A：候选切点由旧的「逐字覆盖（等价于取最后遇到的边界字）」改为
+    「在所有候选切点中取最靠右的一个」，并对单字边界字排除
+    「左侧紧邻行政区划前缀」的情形。旧实现会在名字内部含边界字时多切：
+      广州「至」诚系统集成有限公司  → 诚系统集成有限公司（残留明文「广州至」）
+      被「告」泽远技术…             → 告泽远技术…（残留「被」）
+      …建设的「位于」宜宾志远光电…   → 吞掉 8 个字的正文，条款语义被改写
+    """
     start = end
     while start > 0 and ORG_BODY_RE.match(text[start - 1]):
         start -= 1
-    cut = start
+    cuts = [start]
+    # (a) 单字边界字：排除「左侧紧邻行政区划前缀」的情形（属名字内部用字）
     for i in range(start, end):
-        if text[i] in ORG_LEFT_BOUNDARY:
-            cut = i + 1
-    start = max(cut, start)
+        if text[i] in ORG_LEFT_BOUNDARY and not _preceded_by_region_prefix(text, start, i):
+            cuts.append(i + 1)
+    # (b) 多字虚词 / 角色短语：其结束位置同样作为候选切点
+    for phrase in ORG_LEFT_PHRASES:
+        j = start
+        while True:
+            k = text.find(phrase, j, end)
+            if k < 0:
+                break
+            cuts.append(k + len(phrase))
+            j = k + 1
+    start = max(cuts)
     return start, text[start:end].strip(" ·-&\"'")
 
 
@@ -1093,23 +1521,229 @@ class OrgNameDetector:
                 continue
             if not value.endswith(suffix):
                 continue
+            # R10-B：反语境词——剔除末尾后缀后的 body 含叙述词则拒绝
+            # （`部分分公司` body=`部分`；`最终报送人民银行` body=`最终报送人民`）。
+            body = value[:len(value) - len(suffix)]
+            if any(w in body for w in ORG_ANTI_CONTEXT):
+                continue
+            # R10-C：公权力机关通用名（尾匹配）不是合同当事人，不脱敏。
+            if _is_nonparty_org(value):
+                continue
+            # R11-F2：结构性剥离叙述前缀（按区划名右对齐重切；不满足条件则原样保留）
+            _nv = _org_strip_narrative_prefix(value, suffix)
+            if _nv != value:
+                # 位置用「后缀结束位置 − 新值长度」反推，免受前面各类 strip 的影响
+                start = m.end() - len(_nv)
+                value = _nv
+                if len(value) < 5 or value in ORG_STOPWORDS:
+                    continue
             key = (start, m.end())
             if key in seen:
                 continue
             seen[key] = True
-            conf = 0.88 if suffix in _STRONG_SET else 0.58
+            # O2 修复：弱后缀原为 0.58，紧贴 min_confidence=0.5 的门槛，
+            # 上下文里稍有扣分就会掉到门槛以下被静默丢弃。提到 0.62 留出余量。
+            conf = 0.88 if suffix in _STRONG_SET else 0.62
             reasons = [f"含组织机构后缀「{suffix}」"]
             if ctx.has_kw(start, m.end(), ("甲方", "乙方", "丙方", "供方", "需方", "卖方", "买方", "签约", "受托方", "委托方")):
                 conf += 0.06
                 reasons.append("位于合同主体上下文")
             out.append(RawMatch("ORG_NAME", start, m.end(), min(conf, 0.95), reasons, value,
                                 {"suffix": suffix}))
+        for m in EN_ORG_RE.finditer(text):
+            value = m.group(0).strip()
+            out.append(RawMatch("ORG_NAME", m.start(), m.end(), 0.9,
+                                ["含英文公司法定后缀"], value, {"script": "latin"}))
         return out
 
 
 # ------------------------------------------------------------------------------
 # 4.5 检测器装配
 # ------------------------------------------------------------------------------
+
+# ------------------------------------------------------------------------------
+# 4.5 表格感知的金额检测器（P0 修复：表格金额整列漏检）
+# ------------------------------------------------------------------------------
+# 背景（见《漏洞清单与识别机制说明.md》M1/M2/M3/M5）：
+#   表格里「只放数字、不带单位」的金额，原来只有一条正则能碰——
+#   要求数字带千分位，且**全文 120 字窗口**内出现「金额/价款」等关键词。
+#   真实合同的费用清单有两万多个字，列头与数据行相距远超窗口，于是整列漏检。
+#
+# 修复思路：不再靠全文窗口，而是**按表格结构定位**——
+#   1. 解析层已经给每个表格单元格记了 (表序号, 行序号, 单元格序号) 坐标；
+#   2. 找到「列头行」（整行都是短标签，且其中有「金额/单价/合计」这类列头词）；
+#   3.  该行里写「金额」的列号，其下方所有行的同列单元格，一律按金额处理。
+#   这样「金额」列的数字无论有没有千分位、离列头多远，都能被识别；
+#   而「序号 / 数量 / 单位」列不会被误伤。
+#
+# 局限（有意为之，写入文档留痕）：列头行识别依赖「整行都是短标签」，
+#   合并单元格的大标题行、以及完全无列头的表格不走此路径，仍由正则路径兜底。
+
+# 列头里代表「金额」的词（命中即认为该列是金额列）
+AMOUNT_COL_HEADERS = (
+    "金额", "价款", "价税合计", "合计", "小计", "总计", "总额", "总价", "合价", "单价",
+    "报价", "费用", "收费", "计费", "费率", "税率", "税额", "成本", "预算", "尾款",
+    "首付款", "预付款", "服务费", "报酬", "酬金", "对价", "应收", "应付", "结算",
+    "合同金额", "含税金额", "不含税金额", "税前", "税后", "人民币", "元", "万元",
+    "刊例价", "刊例费", "代言费", "出场费", "工时费", "工价",
+)
+# 这些词出现在单元格里，基本说明它是「表格标题」而不是「列头」
+_AMOUNT_HEADER_TITLE_WORDS = ("明细", "清单", "一览", "汇总表", "说明书", "备注", "名称", "内容")
+# 列头词之外**允许**附带的修饰字（「金额（元）」「含税金额」「费用合计」「单价/月」…）。
+# 白名单以外一律不算列头——否则数据行里的「带宽费用」会被当成列头。
+_AMOUNT_HEADER_EXTRA_CHARS = set("（）()元人民币万含不含税价金额款费合计小总标的准月年天次人台项月")
+# 整格就是一个金额的判定用（见 _parse_amount_cell）
+_AMOUNT_CELL_RE = re.compile(
+    r"^\s*(?:人民币|RMB|CNY|￥|¥)?\s*"
+    r"(?P<num>[0-9][0-9,]*(?:\.[0-9]{1,2})?)"
+    r"\s*(?P<unit>亿元|万元|亿|万|元|圆|块)?"
+    r"(?:\s*/\s*(?:月|年|日|季|人|台|个|次|份|小时|天|㎡|平方米|户|项))?"
+    r"(?:\s*(?:整|含税|不含税|税前|税后))?"
+    r"(?:\s*[（(][^（()）]{0,12}[)）])?"
+    r"\s*$"
+)
+_HEADER_STRIP_RE = re.compile(r"[\s\u3000:：()（）\[\]【】|｜,，.。、]")
+
+
+def _is_amount_header(cell: str) -> bool:
+    """该单元格文本是不是「金额类列头」。
+
+    判定要点：列头词必须**几乎占满整个单元格**——除列头词外只允许「元/含税/合计」
+    这类修饰字（见 _AMOUNT_HEADER_EXTRA_CHARS）。否则数据行里的
+    「带宽费用」「服务器租用费用」都会被当成列头，该行数据整体被跳过。
+    """
+    t = _HEADER_STRIP_RE.sub("", cell or "")
+    if not (1 <= len(t) <= 12):
+        return False
+    if len(t) >= 5 and any(w in t for w in _AMOUNT_HEADER_TITLE_WORDS):
+        return False
+    for w in AMOUNT_COL_HEADERS:
+        if t == w:
+            return True
+        if w in t:
+            extra = t.replace(w, "", 1)
+            if len(extra) <= 3 and all(c in _AMOUNT_HEADER_EXTRA_CHARS for c in extra):
+                return True
+    return False
+
+
+_PURE_NUMBER_CELL_RE = re.compile(r"^[\d.,，%]+$")
+
+
+def _row_has_number(cells, text: str) -> bool:
+    """该行是否含纯数字单元格——含则说明它是数据行，不能当列头行。
+
+    cells 为 (grid 起始列, 跨列数, 起始, 结束) 四元组列表。
+    """
+    return any(_PURE_NUMBER_CELL_RE.match(text[s:e].strip()) for _c, _sp, s, e in cells)
+
+
+def _parse_amount_cell(cell: str, min_digits: int = 2) -> Optional[Tuple[str, float, str]]:
+    """把「整格就是一个金额」的单元格解析成 (值, 置信度, 理由)；不是则 None。
+
+    min_digits：最少有效数字位数（默认 2，防把序号当金额）。在「已由列头确认是
+    金额列」的路径下可放宽到 1——该语境下不存在序号列，像 ¥5/㎡ 这类 1 位单价
+    是合法金额，不应漏掉。
+    """
+    m = _AMOUNT_CELL_RE.match(cell or "")
+    if not m:
+        return None
+    num = m.group("num")
+    unit = m.group("unit") or ""
+    digits = re.sub(r"\D", "", num)
+    # 位数过少多半是序号（默认路径）；超长数字是电话/证件号，都不当金额
+    if len(digits) < min_digits or len(digits) > 15:
+        return None
+    if num.startswith("0") and len(digits) > 1 and "." not in num:
+        return None
+    has_sep = "," in num
+    has_dec = "." in num
+    if unit:
+        conf, why = 0.80, "表格金额列（带单位）"
+    elif has_sep or has_dec:
+        conf, why = 0.76, "表格金额列（含千分位/小数）"
+    elif len(digits) >= 4:
+        conf, why = 0.72, "表格金额列（4 位以上整数）"
+    else:
+        conf, why = 0.62, "表格金额列（2~3 位整数）"
+    return m.group(0).strip(), conf, why
+
+
+class TableAmountDetector:
+    """按表格结构识别「金额列」里的数字（含无单位、无千分位的裸数字）。"""
+
+    type_id = "AMOUNT"
+
+    def run(self, ctx: ScanContext) -> List[RawMatch]:
+        blocks = getattr(ctx, "blocks", None) or []
+        if not blocks:
+            return []
+        text = ctx.text
+
+        # 1) 块 → 归一化全文区间 + 表格坐标（列号为 gridSpan 展开后的视觉列）
+        #    下标算法与 DetectorEngine.scan_document 拼接 full_raw 的方式保持一致：
+        #    块文本 rstrip("\n") 后逐块累加，块间补一个 "\n"。
+        pos = 0
+        rows: Dict[Tuple[int, int], List[Tuple[int, int, int, int]]] = {}
+        for b in blocks:
+            t = (getattr(b, "text", "") or "").rstrip("\n")
+            ln = len(NormalizedText(t).norm)
+            ref = getattr(b, "table_ref", None)
+            if ref is not None and ln:
+                ti, ri, c_start, c_span = ref
+                rows.setdefault((ti, ri), []).append((c_start, c_span, pos, pos + ln))
+            pos += ln + 1
+        if not rows:
+            return []
+
+        # 2) 认「列头行」：整行都是短标签、其中有金额类列头、且**不含纯数字单元格**。
+        #    要求 ≥2 个单元格，以免把合并单元格的表格大标题（如「服务费用明细表」）当列头；
+        #    含纯数字则说明是数据行（如「2 | 带宽费用 | 6 | 3500 | 21000」）。
+        #    列头若横向合并（gridSpan），其覆盖的**全部 grid 列**都算金额列——
+        #    这样表头「单价」跨 3 列时，数据行的主材/人工/辅材都被覆盖，不会整体错位。
+        header_rows: set = set()
+        amount_cols: Dict[int, set] = {}
+        for (ti, ri), cells in rows.items():
+            if len(cells) < 2:
+                continue
+            if not all(len(_HEADER_STRIP_RE.sub("", text[s:e])) <= 14
+                       for _c, _sp, s, e in cells):
+                continue
+            if _row_has_number(cells, text):
+                continue
+            hit_spans = [(c, sp) for c, sp, s, e in cells if _is_amount_header(text[s:e])]
+            if not hit_spans:
+                continue
+            header_rows.add((ti, ri))
+            bucket = amount_cols.setdefault(ti, set())
+            for c, sp in hit_spans:
+                bucket.update(range(c, c + sp))
+        if not amount_cols:
+            return []
+
+        # 3) 列头行以下的每一个同行号单元格，只要**覆盖到**金额列就按金额处理。
+        #    「已由列头确认是金额列」的语境下不存在序号列，故 min_digits 放宽到 1
+        #    （¥5/㎡ 这类 1 位单价是合法金额，不应漏）。
+        out: List[RawMatch] = []
+        for (ti, ri), cells in rows.items():
+            if (ti, ri) in header_rows:
+                continue
+            cols = amount_cols.get(ti)
+            if not cols:
+                continue
+            for c, sp, s, e in cells:
+                if not any(x in cols for x in range(c, c + sp)):
+                    continue
+                parsed = _parse_amount_cell(text[s:e], min_digits=1)
+                if not parsed:
+                    continue
+                value, conf, why = parsed
+                sel_start = s + (len(text[s:e]) - len(text[s:e].lstrip()))
+                out.append(RawMatch("AMOUNT", sel_start, sel_start + len(value), conf,
+                                    [why, f"表格第 {ti} 张第 {ri} 行第 {c} 列（列头定位）"],
+                                    value, {"table": ti, "row": ri, "col": c}))
+        return out
+
 
 def build_detectors(custom_specs: Sequence[RegexSpec] = ()) -> List[Any]:
     specs: List[RegexSpec] = [
@@ -1159,16 +1793,21 @@ def build_detectors(custom_specs: Sequence[RegexSpec] = ()) -> List[Any]:
         ),
         RegexSpec(
             "BANK_ACCOUNT",
-            r"(?<![\d.,])\d{9,25}(?![\d.])",
+            # 兼容两种排版：① 连写 9~25 位；② 按 3~6 位分组、用空格/连字符分隔
+            #   （合同常写成「6222 0000 0000 0000 000」——旧规则不容许空格，整条失配）。
+            r"(?<![\d.,])(?:\d{9,25}|\d{3,6}(?:[ \-\u00a0\u3000]\d{3,6}){2,4})(?![\d.])",
             conf_ok=0.55, conf_weak=0.35,
             keywords=("账号", "帐号", "账户", "开户", "汇款", "收款", "转账", "银行", "对公"),
             kw_boost=0.3, require_keyword=True,
-            anti_keywords=("金额", "人民币", "¥", "￥", "价款", "元"),
+            # 分段写法会与「分段座机号」形近，故补电话类反关键词降权（require_keyword 仍兜底）
+            anti_keywords=("金额", "人民币", "¥", "￥", "价款", "元",
+                           "电话", "传真", "座机", "服务热线"),
         ),
         # ---------------- 手机 / 座机 ----------------
         RegexSpec(
             "PHONE_MOBILE",
-            r"(?<!\d)1[3-9]\d{9}(?!\d)",
+            # R6：兼容分段写法「138 0000 0000」/「138-0000-0000」（此前只认 11 位连写，整条失配）。
+            r"(?<!\d)(?:1[3-9]\d{9}|1[3-9]\d(?:[ \-\u00a0\u3000]?\d{4}){2})(?!\d)",
             conf_ok=0.88, conf_weak=0.88,
             keywords=("手机", "电话", "联系", "联系方式", "联系电话", "移动电话", "号码"),
         ),
@@ -1195,7 +1834,11 @@ def build_detectors(custom_specs: Sequence[RegexSpec] = ()) -> List[Any]:
         RegexSpec(
             "EMAIL",
             r"[A-Za-z0-9._%+\-]{1,64}@[A-Za-z0-9.\-]{2,}\.[A-Za-z]{2,24}",
-            conf_ok=0.9, conf_weak=0.9, strip_chars=".,;:，。；：)）",
+            # R8-C2：把填空下划线一并列入剥离字符。否则「邮箱：__x@y.com」的前导
+            # '__' 会被圈进替换区间（连带吞掉落款处的填空线）。
+            # 注意：这条必须与 RegexDetector.lead 的两步记账同批生效，否则
+            # 区间末尾会偏左、留下若干字符的明文残留。
+            conf_ok=0.9, conf_weak=0.9, strip_chars=".,;:，。；：)）_＿",
         ),
         RegexSpec(
             "POSTCODE",
@@ -1234,7 +1877,7 @@ def build_detectors(custom_specs: Sequence[RegexSpec] = ()) -> List[Any]:
             conf_ok=0.72, conf_weak=0.72,
         ),
         # 表格中只放数字的金额（无单位）—— 必须带千分位（4 位以下裸数字风险太高）
-        # 关键词窗口 120 字；附带 anti_keywords 排除身份证/统一代码/年份前缀等
+        # 关键词窗口 200 字；附带 anti_keywords 排除身份证/统一代码/年份前缀等
         RegexSpec(
             "AMOUNT",
             r"(?<![0-9.,])(?:[0-9]{1,3}(?:,\d{3})+(?:\.\d+)?)(?![0-9])",
@@ -1244,9 +1887,15 @@ def build_detectors(custom_specs: Sequence[RegexSpec] = ()) -> List[Any]:
                       "工时费", "金额（元）", "尾款", "比例", "付款节点",
                       "付款条件", "含税", "报价", "刊例", "CPM", "CPC",
                       "KOL", "媒体", "刊例价", "刊例费", "投放", "采购",
-                      "服务费", "代言费", "出场费"),
+                      "服务费", "代言费", "出场费",
+                      # M3 修复：表头常写「单价 / 合价 / 合计」，此前不在关键词表里，
+                      # 即使数字带千分位也整列漏检。
+                      "单价", "合价", "合计", "小计", "总计", "总额", "价款总额",
+                      "价税合计", "含税金额", "不含税金额", "税额", "金额合计",
+                      "单价（元）", "单价(元)", "费用合计", "收费", "计费", "费率"),
             kw_boost=0.25, require_keyword=True,
-            context_chars=120,
+            # M2 修复：原窗口 120 字，金额列与该列列头在长表格里常相距超过 120 字。
+            context_chars=200,
             anti_keywords=("统一社会信用代码", "证件号码", "身份证", "证件号",
                            "纳税人识别号", "银行账号", "账号", "合同编号",
                            "协议编号", "工单号", "发票号码"),
@@ -1392,6 +2041,8 @@ def build_detectors(custom_specs: Sequence[RegexSpec] = ()) -> List[Any]:
     detectors.append(PersonNameDetector())
     detectors.append(AddressDetector())
     detectors.append(OrgNameDetector())
+    # P0 修复：表格列对齐的金额识别（列头是「金额/单价/合计」的整列数字）
+    detectors.append(TableAmountDetector())
     return detectors
 
 
@@ -1508,7 +2159,7 @@ ORG_REGION_PREFIXES: Tuple[str, ...] = (
 
 # 机构名通用后缀（强/弱后缀 + 泛化的「公司」），用于剥离出字号
 ORG_GENERIC_SUFFIXES: Tuple[str, ...] = tuple(sorted(
-    set(ORG_SUFFIX_STRONG) | set(ORG_SUFFIX_WEAK) | {"公司"},
+    set(ORG_SUFFIX_STRONG) | set(ORG_SUFFIX_WEAK) | set(EN_ORG_SUFFIXES) | {"公司"},
     key=len, reverse=True,
 ))
 
@@ -1518,6 +2169,24 @@ ORG_CORE_MIN = 3
 
 # 剥离后不具区分度的「空壳」名字（不能拿来判断两家机构是否同一主体）
 ORG_MEANINGLESS = set(ORG_GENERIC_SUFFIXES) | set(ORG_REGION_PREFIXES)
+
+# R8-B：无关键词括号定义的「通名 / 地名 / 纯后缀」拒绝集。
+# 「字符全含」护栏挡不住这类词——「集成」「系统」的每个字都出现在
+# 「…系统集成有限公司」里；但一旦登记成简称，全文的「集成」「系统」
+# 都会被替换成机构占位符，那才是真正毁正文的事故。故单列一张拒绝表。
+ORG_ALIAS_BANAL = set(ORG_GENERIC_SUFFIXES) | set(ORG_REGION_PREFIXES) | {
+    "集成", "系统", "科技", "技术", "智能", "信息", "网络", "电子", "实业", "集团",
+    "工程", "建设", "管理", "服务", "咨询", "贸易", "物流", "制造", "设备", "材料",
+    "发展", "设计", "销售", "安装", "维修", "运输", "有限", "责任", "股份", "企业",
+}
+
+# R8-B：无「简称 / 称」关键词的括号定义，形如 （“至诚集成”）。
+_ORG_NO_KEY_ALIAS_RE = re.compile(
+    r"[（(]\s*[「“\"'‘]\s*([\u4e00-\u9fffA-Za-z0-9]{2,20})\s*[」”\"'’]\s*[)）]"
+)
+
+# R8-B：护栏①「紧邻」判定时，容许夹在本机构全称与括号之间的连接词
+_ORG_ALIAS_GLUE = set("之的与及和、 \u3000:：,，;；")
 
 # 前缀按长度倒序匹配，保证「中华人民共和国」先于「中国」被剥掉
 ORG_REGION_PREFIXES_SORTED: Tuple[str, ...] = tuple(
@@ -1687,8 +2356,12 @@ class EntityNumberer:
     只要三处都拿同一份 detector 报告来构造，编号就一定一致。
     """
 
-    def __init__(self, items: Optional[Iterable[Dict[str, Any]]] = None):
+    def __init__(self, items: Optional[Iterable[Dict[str, Any]]] = None,
+                 overrides: Optional[Dict[Tuple[str, str], int]] = None):
         self._map: Dict[Tuple[str, str], int] = build_entity_number_map(items or ())
+        if overrides:
+            for (tid, value), number in overrides.items():
+                self._map[(tid, _norm_key(value))] = number
         self._next: Dict[str, int] = {}
         for (t, _k), n in self._map.items():
             if n > self._next.get(t, 0):
@@ -1779,7 +2452,7 @@ class DetectorEngine:
         full_raw = "\n".join(parts)
 
         nt = NormalizedText(full_raw)
-        ctx = ScanContext(nt, nt.norm)
+        ctx = ScanContext(nt, nt.norm, blocks)
 
         raw_matches: List[RawMatch] = []
         for det in self.detectors:
@@ -1825,14 +2498,68 @@ class DetectorEngine:
 
         for om in orgs:
             alts: List[Tuple[str, float, str]] = []
-            # 1) 显式简称定义（限定在全称之后的 40 字窗口内）
-            tail = text[om.end: om.end + 40]
+            # 1) 显式简称定义
+            # O3 修复：原窗口只有全称之后的 40 字，定义稍远就漏派生。
+            # 这里放宽到 120 字，但用「下一个机构全称的起点」封顶——
+            # 既覆盖「全称，其后再定义简称」的写法，又不会把后一家公司的
+            # 简称错记到前一家头上（两家主体被并成同一个编号是更严重的错误）。
+            next_org_start = min((m.start for m in orgs if m.start >= om.end), default=len(text))
+            _zone = text[om.end: min(om.end + 120, next_org_start)]
+            # R7 修复：原窗口只按「下一家机构全称的起点」封顶，不按句子边界封顶，
+            # 于是紧邻的、属于**其它对象**的括号定义会被错记成这家公司的简称。
+            # 实例：「宏远档案管理（上海）有限公司（“宏远”）将按本合同随附或引用之附表
+            #       提供服务（下称“附表”），客户则…」→「附表」被登记为宏远公司的简称。
+            # 这里把窗口收敛到「全称所在句内」：遇到句末标点或换行即停。
+            _b = re.search(r"[。；;！？!?\n]", _zone)
+            tail = _zone[:_b.start()] if _b else _zone
+            if om.attrs.get("script") == "latin":
+                # 双语合同常写作「[Acme Technologies Limited]（“ACME”）」；
+                # 全称后可能有一层方括号，但不要求出现“以下简称”。
+                for dm in re.finditer(
+                    r"^[\]】]?\s*[（(]\s*[“\"'‘]([A-Za-z][A-Za-z0-9&.-]{1,19})[”\"'’]\s*[)）]",
+                    tail,
+                ):
+                    alts.append((dm.group(1), 0.92, "英文主体简称定义"))
             for dm in re.finditer(
                 r"[（(]\s*(?:以下|下)?\s*(?:简称|称)\s*[:：]?\s*[「“\"'‘]?"
                 r"([\u4e00-\u9fffA-Za-z0-9]{2,20})\s*[」”\"'’]?\s*[)）]",
                 tail,
             ):
                 alts.append((dm.group(1), 0.9, "显式简称定义"))
+            # R8-B：无「简称 / 称」关键词的括号定义 —— 形如「公司全称（“至诚集成”）」。
+            # 合同里 (…“X”) 是通用定义语法，多数时候定义的是文件 / 期限 / 角色而非
+            # 公司简称（实测 10 份文书 9 个词条中 6 个非敏感），故必须串上四道护栏：
+            #   ① 紧邻：括号须紧贴本机构全称（中间只容 之/的/与/及/和/、 与空白）；
+            #   ② 字符全含：引号内**每个字**都出现在全称里 —— 用「全含」而非重合率，
+            #      否则 2 字真简称（如「宏远」）会被误杀；
+            #   ③ 黑名单：复用 R7 的 _is_nonparty_alias()（下方统一出口还会再查一次）；
+            #   ④ 通名 / 地名：单独成词的 集成/系统/公司/上海 一类一律拒，
+            #      否则会把全文的「集成」「广州」整体替换掉。
+            if om.attrs.get("script") != "latin":
+                for dm in _ORG_NO_KEY_ALIAS_RE.finditer(tail):
+                    alias = dm.group(1)
+                    left = text[:om.end + dm.start()]
+                    hit = om.value if left.endswith(om.value) else ""
+                    if not hit:
+                        # 容许夹 ≤2 个连接词（「的」「与」「和」…）
+                        cut = left
+                        for _ in range(2):
+                            if cut and cut[-1] in _ORG_ALIAS_GLUE:
+                                cut = cut[:-1]
+                                if cut.endswith(om.value):
+                                    hit = om.value
+                                    break
+                            else:
+                                break
+                    if not hit:
+                        continue                                   # ① 未紧邻本机构全称
+                    if not all(ch in hit for ch in alias):
+                        continue                                   # ② 字符非全含
+                    if _is_nonparty_alias(alias):
+                        continue                                   # ③ 文件 / 条款 / 期限 / 角色词
+                    if alias in ORG_ALIAS_BANAL:
+                        continue                                   # ④ 通名 / 地名 / 纯后缀
+                    alts.append((alias, 0.86, "无关键词括号定义"))
             # 2) 字号 / 字号+公司
             core = org_core(_norm_key(om.value))
             if len(core) >= 4:
@@ -1844,6 +2571,9 @@ class DetectorEngine:
             full_key = _norm_key(om.value)
             for alt, conf, why in alts:
                 if not alt or _norm_key(alt) == full_key:
+                    continue
+                # R7：文件 / 条款 / 期限 / 角色词不得当作机构简称。
+                if _is_nonparty_alias(alt):
                     continue
                 start = 0
                 while True:
@@ -2778,6 +3508,7 @@ def process_file(path: str, settings: Settings, out_dir: str, formats: set,
                  used_bases: Optional[set] = None,
                  review_api: Optional[str] = None) -> Dict[str, Any]:
     doc = load_document(path, include_headers=include_headers)
+    require_pdf_text(doc)
     engine = DetectorEngine(settings)
     candidates = engine.scan_document(doc)
     report = build_report(doc, candidates, settings)

@@ -11,11 +11,12 @@ from __future__ import annotations
 
 import html as _html
 import json
+import urllib.parse
 from typing import Any, Dict
 
-APP_TITLE = "合同脱敏 / 还原"
-APP_SUBTITLE = "Contract Redactor"
-APP_VERSION = "1.1.0"
+APP_TITLE = "文书脱敏 / 还原"
+APP_SUBTITLE = "Legal Document Redactor"
+APP_VERSION = "1.2.3"
 
 esc = _html.escape
 
@@ -161,6 +162,14 @@ h3{font-size:13px;font-weight:600;margin:0}
   overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .pill.ghost{background:var(--surface-2);color:var(--sub)}
 .pill.acc{background:var(--acc-soft);border-color:var(--acc-line);color:var(--acc)}
+/* R7 历史记录页 */
+.histrow{display:flex;align-items:center;gap:14px;padding:13px 2px;border-bottom:1px solid var(--line-soft);flex-wrap:wrap}
+.histrow:last-child{border-bottom:0}
+.hist-main{min-width:0;flex:1 1 320px}
+.hist-name{font-size:13.5px;font-weight:600;color:var(--ink);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.hist-sub{font-size:12px;color:var(--faint);margin-top:4px;display:flex;gap:9px;flex-wrap:wrap;align-items:center}
+.hist-act{display:flex;gap:7px;align-items:center;flex-wrap:wrap}
+.hist-empty{padding:28px 4px;color:var(--sub);font-size:13px;text-align:center}
 
 .card{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
   padding:20px 22px;margin-bottom:18px;box-shadow:var(--sh-1)}
@@ -273,8 +282,13 @@ h3{font-size:13px;font-weight:600;margin:0}
 .seg-btn.on[data-sev=medium]{color:#fff;background:var(--md);box-shadow:none}
 .seg-btn.on[data-sev=low]{color:#fff;background:var(--lo);box-shadow:none}
 .seg-btn.on[data-sev=all]{color:#fff;background:#3a4763;box-shadow:none}
-.types-wrap{margin-top:12px;padding-top:12px;border-top:1px dashed var(--line);display:none}
-.types-wrap.open{display:block}
+/* 类型面板：已移出吸顶工具栏（见下方 HTML），改为独立卡片。
+   限高 + 内部滚动 → 它只会把下方内容"推开"，不会"盖住"
+   「添加漏识别的字段」卡片（这正是用户此前看不到补录入口的原因）。 */
+.card.types-card{margin:0 0 14px;padding:15px 17px;display:none}
+.card.types-card.open{display:block;max-height:min(38vh,300px);overflow:auto;
+  overscroll-behavior:contain;padding-right:14px}
+.card.types-card .cat:first-child{margin-top:0}
 .cat{display:flex;align-items:center;gap:9px;font-size:12px;color:var(--faint);font-weight:600;
   letter-spacing:.04em;text-transform:uppercase;margin:14px 0 8px}
 .cat::after{content:"";flex:1;height:1px;background:var(--line-soft)}
@@ -291,6 +305,22 @@ h3{font-size:13px;font-weight:600;margin:0}
 .chip.on[data-sev=low]{border-color:#b6e2ef;background:#f1fbfe;color:#0a6a83}
 .chip.off{opacity:.42;background:var(--surface-2)}
 .chip.off .cnt{text-decoration:line-through}
+
+/* ------------------------------------------- 自选字段入口
+   只保留一处：类型面板末尾的虚线芯片（＋ 添加自选字段）。
+   看类型列表的时刻，正是产生"我要脱敏的东西不在里头"念头的时刻；
+   工具栏不再放同名按钮，避免窄屏换行把吸顶条顶高。 */
+.chip.addchip{font-family:inherit;font-weight:600;color:var(--acc);
+  border-color:var(--acc-line);border-style:dashed;background:var(--acc-soft)}
+.chip.addchip:hover{background:var(--acc);color:#fff;border-color:var(--acc);border-style:solid}
+.card.termcard{border-color:var(--acc-line);background:linear-gradient(180deg,#f7f9ff,#fff)}
+.card.termcard h2{margin-bottom:8px}
+.card.termcard.flash{animation:termflash 1.5s ease-out}
+@keyframes termflash{
+  0%{box-shadow:0 0 0 0 rgba(51,85,255,.34),var(--sh-1)}
+  60%{box-shadow:0 0 0 10px rgba(51,85,255,0),var(--sh-1)}
+  100%{box-shadow:0 0 0 0 rgba(51,85,255,0),var(--sh-1)}
+}
 
 .compare{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
 .pane{background:var(--surface);border:1px solid var(--line);border-radius:var(--r);
@@ -409,11 +439,12 @@ __CSS__
   <div class="topbar-in">
     <a class="brand" href="/" title="回到首页">
       <span class="mark">__MARK__</span>
-      <span class="brand-txt"><b>合同脱敏 / 还原</b><i>__SUBTITLE__</i></span>
+      <span class="brand-txt"><b>文书脱敏 / 还原</b><i>__SUBTITLE__</i></span>
     </a>
     <div class="topbar-mid">__MID__</div>
     <div class="topbar-act">
       <span class="live"><span class="pulse"></span>离线运行中</span>
+      <a class="btn sm ghost" href="/history" title="查看本机留存的历次处理记录">历史记录</a>
       <button class="btn sm ghost" onclick="quitApp()" title="停止本地服务">退出</button>
     </div>
   </div>
@@ -424,7 +455,7 @@ __BODY__
 <footer class="foot">
   <span>🔒 <b>完全离线</b>：所有解析与改写均在本机完成，文件不外传</span>
   <span>·</span>
-  <span>合同脱敏 / 还原 <b>v__VERSION__</b></span>
+  <span>文书脱敏 / 还原 <b>v__VERSION__</b></span>
 </footer>
 <script>
 async function quitApp(){
@@ -456,7 +487,7 @@ LOADING_HTML = """<!DOCTYPE html>
 <html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <meta name="color-scheme" content="light">
-<title>正在启动 · 合同脱敏 / 还原</title>
+<title>正在启动 · 文书脱敏 / 还原</title>
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <style>
 __CSS__
@@ -505,8 +536,8 @@ UPLOAD_BODY = r"""
 <section class="hero">
   <div class="hero-copy">
     <span class="eyebrow">本地离线 · 无需联网</span>
-    <h1>合同脱敏 / 还原</h1>
-    <p>上传 Word / PDF / 文本合同，自动识别身份证号、手机号、姓名、地址、金额等敏感信息，一键替换为<b>可逆占位符</b>；需要时再把占位符精确还原回原文，批注与修订全部保留。</p>
+    <h1>文书脱敏 / 还原</h1>
+    <p>上传 Word / PDF / 文本文书，自动识别并复核敏感信息，也可自行添加原文和别名。诉讼材料外发审阅模式仅支持 Word，并检查批注、修订和隐藏内容。</p>
   </div>
   __HERO_ART__
 </section>
@@ -521,22 +552,33 @@ UPLOAD_BODY = r"""
           <div class="mode active" data-mode="redact">
             <div class="ic">🔒</div>
             <div class="name">脱敏模式</div>
-            <div class="desc">上传<strong>原始</strong>合同 → 自动进入左右对比页 → 确认后输出 <code>合同_脱敏.docx</code> 与映射文件。</div>
+            <div class="desc">上传<strong>原始</strong>文书 → 复核识别结果 → 输出脱敏文件。还原映射文件须单独保管。</div>
           </div>
           <div class="mode" data-mode="restore">
             <div class="ic">🔓</div>
             <div class="name">还原模式</div>
-            <div class="desc">上传<strong>已脱敏</strong>的合同，自动在文档内部寻找映射材料并回填原文，输出 <code>合同_还原.docx</code>。</div>
+            <div class="desc">上传<strong>已脱敏</strong>文书，并提供对应的映射文件，回填原文。</div>
           </div>
         </div>
       </div>
 
       <div class="card">
-        <h2><span class="step-n">2</span>上传合同文件</h2>
+        <h2><span class="step-n">2</span>选择用途并上传文书</h2>
+        <label class="field" style="display:block;margin-bottom:12px">使用场景<br>
+          <select name="profile" id="profile-input" style="width:100%;padding:10px;margin-top:5px">
+            <option value="contract">合同等文书的内部复核（DOCX / PDF / 文本）</option>
+            <option value="litigation">诉讼材料发给外部顾问或 AI（仅 DOCX）</option>
+          </select>
+        </label>
+        <div class="alert info" id="profileHelp" style="margin:0 0 12px"></div>
+        <label class="field" style="display:block;margin-bottom:12px">案件或项目名称（可选；后续文书请填写完全相同的名称）<br>
+          <input type="text" name="case_name" id="case-name" maxlength="80" placeholder="例如：某某案或某项目" style="width:100%;padding:10px;margin-top:5px">
+        </label>
+        <p class="stat" style="margin:0 0 12px">例如起诉状和证据目录都填“某某案”：自选规则可供后续上传的文书沿用；已经导出的文件不会自动修改。留空则只处理当前文书。</p>
         <div class="drop" id="drop">
           <div class="ic">📄</div>
           <p class="t">把文件拖到这里，或点击选择</p>
-          <p class="h">支持 .docx / .pdf / .txt · 单个文件不超过 100 MB</p>
+          <p class="h" id="fileTypes">支持 .docx / .pdf / .txt / .md · 单个文件不超过 100 MB</p>
           <input type="file" name="file" id="file-input" accept=".docx,.pdf,.txt,.md">
         </div>
         <div id="filename"></div>
@@ -555,7 +597,7 @@ UPLOAD_BODY = r"""
 
     <div class="col stack">
       <div class="card">
-        <h2>🔎 会识别什么</h2>
+        <h2>🔎 自动识别的基础范围</h2>
         <ul class="tlist">
           <li>身份证号、港澳台居民证件、护照号</li>
           <li>手机号、固定电话、邮箱</li>
@@ -565,10 +607,11 @@ UPLOAD_BODY = r"""
           <li>银行账号、开户行</li>
           <li>合同金额、价款、违约金（大写与小写）</li>
           <li>合同编号、日期、期限</li>
+          <li>诉讼模式另提示案号、法院名称；当事人和证人姓名沿用姓名规则</li>
         </ul>
         <div class="alert info" style="margin:14px 0 0">
           <span class="i">ℹ️</span>
-          <span>识别采用「格式规则 + 国标校验位」双重判定，身份证、统一社会信用代码、银行卡号会做校验位验算，尽量降低误报。</span>
+          <span>识别结果默认勾选，但仍须逐处复核。医疗信息、商业秘密等没有可靠的通用格式，通常需手工添加原文和别名。</span>
         </div>
       </div>
 
@@ -578,14 +621,14 @@ UPLOAD_BODY = r"""
           <li>不需要任何网络连接，<b>不调用大模型与云端接口</b></li>
           <li>只监听 <code>127.0.0.1</code>，外部设备无法访问</li>
           <li>处理结果落盘在本地会话目录，可随时清理</li>
-          <li>还原只改写正文文字，不动批注 / 修订 / 样式</li>
+          <li>外发审阅会清除 DOCX 批注；遇到修订、隐藏文字、图片或复杂对象会停止导出并提示处理</li>
         </ul>
       </div>
 
       <div class="card">
         <h2>🧭 使用流程</h2>
         <ol class="olist">
-          <li><span class="n">1</span><span>选择模式并上传合同</span></li>
+          <li><span class="n">1</span><span>选择用途并上传文书</span></li>
           <li><span class="n">2</span><span>在左右对比页核对识别结果，按类型 / 严重度筛选，可单独取消某处</span></li>
           <li><span class="n">3</span><span>点击确认，生成脱敏文件与映射材料</span></li>
           <li><span class="n">4</span><span>需要原文时上传脱敏稿，一键还原</span></li>
@@ -606,6 +649,26 @@ var drop=document.getElementById('drop'),
 
 var LABEL={redact:'进入左右对比 →',restore:'上传并还原 →'};
 
+function syncProfile(){
+  var litigation=modeInput.value==='redact' && document.getElementById('profile-input').value==='litigation';
+  var help=document.getElementById('profileHelp');
+  if(litigation){
+    help.textContent='外发审阅：只接收 DOCX；自动提示姓名、机构、案号和法院等候选，医疗信息和商业秘密通常要手工添加。导出会检查隐藏内容，遇到无法安全处理的结构会停止。';
+    document.getElementById('fileTypes').textContent='仅支持 .docx · 单个文件不超过 100 MB';
+    fileInput.accept='.docx';
+    if(fileInput.files && fileInput.files[0] && !/\.docx$/i.test(fileInput.files[0].name)){
+      fileInput.value=''; filenameEl.innerHTML='';
+    }
+  }else{
+    help.textContent=modeInput.value==='restore'
+      ? '还原须提供对应的 mapping.json；新生成的脱敏文件不会内嵌原文映射。'
+      : '内部复核：可处理合同等文字文书，保留原文结构；此模式生成的 DOCX 不作为外发干净副本。';
+    document.getElementById('fileTypes').textContent='支持 .docx / .pdf / .txt / .md · 单个文件不超过 100 MB';
+    fileInput.accept='.docx,.pdf,.txt,.md';
+  }
+  syncBtn();
+}
+
 function syncBtn(){
   var has=fileInput.files && fileInput.files.length;
   submitBtn.disabled=!has;
@@ -618,9 +681,10 @@ Array.prototype.forEach.call(document.querySelectorAll('#mode-picker .mode'),fun
     Array.prototype.forEach.call(document.querySelectorAll('#mode-picker .mode'),function(x){x.classList.remove('active');});
     el.classList.add('active');
     modeInput.value=el.getAttribute('data-mode');
-    syncBtn();
+    syncProfile();
   });
 });
+document.getElementById('profile-input').addEventListener('change',syncProfile);
 
 function showFile(f){
   if(!f) return;
@@ -649,6 +713,8 @@ document.getElementById('upload-form').addEventListener('submit',async function(
     var fd=new FormData();
     fd.append('file',f);
     fd.append('mode',modeInput.value);
+    fd.append('profile',document.getElementById('profile-input').value);
+    fd.append('case_name',document.getElementById('case-name').value.trim());
     var r=await fetch('/api/upload',{method:'POST',body:fd});
     var j=await r.json();
     if(!j.ok){ throw new Error(j.error||'上传失败'); }
@@ -661,7 +727,7 @@ document.getElementById('upload-form').addEventListener('submit',async function(
     syncBtn();
   }
 });
-syncBtn();
+syncProfile();
 </script>
 """
 
@@ -692,12 +758,12 @@ __HINT__
     <div class="mode __REDACT_ACTIVE__" data-mode="redact">
       <div class="ic">🔒</div>
       <div class="name">脱敏</div>
-      <div class="desc">识别敏感信息并生成可逆占位符，输出 <code>合同_脱敏.docx</code>；映射材料会同步写进文档内部，<b>无须额外保管文件</b>。</div>
+      <div class="desc">识别敏感信息并生成可逆占位符；还原用的 <code>mapping.json</code> 是单独文件，必须安全保管。</div>
     </div>
     <div class="mode __RESTORE_ACTIVE__" data-mode="restore">
       <div class="ic">🔓</div>
       <div class="name">还原</div>
-      <div class="desc">把脱敏稿里的占位符回填为原文，输出 <code>合同_还原.docx</code>；批注 / 审阅 / 修订等原有元素完全保留。</div>
+      <div class="desc">通过单独保存的映射文件，把脱敏稿里的占位符回填为原文。</div>
     </div>
   </div>
 </div>
@@ -784,7 +850,7 @@ def build_workspace_body(sid: str, info: Dict[str, Any]) -> bytes:
 
     if mode == "restore":
         summary = "还原模式 · 已跳过识别"
-        head_title = "还原合同"
+        head_title = "还原文书"
     else:
         summary = f"{counts.get('types', 0)} 类 / {counts.get('occurrences', 0)} 处候选项"
         head_title = "选择操作"
@@ -847,6 +913,9 @@ REVIEW_BODY = r"""
   </div>
 </div>
 
+<div class="alert info" style="margin-bottom:14px"><span class="i">ℹ️</span><span>__REVIEW_CONTEXT__<br>识别到的类型和位置<b>默认已勾选，会被替换</b>。在下方取消某一类型，或点击原文中的单处高亮取消。确认前请检查漏识别的内容。</span></div>
+__PARSE_WARNINGS__
+
 <div class="toolbar">
   <div class="tb-row">
     <span class="tb-label">严重度</span>
@@ -857,12 +926,32 @@ REVIEW_BODY = r"""
       <button type="button" class="seg-btn" data-sev="low">低</button>
     </div>
     <span class="grow"></span>
-    <button type="button" class="btn sm ghost" id="toggleTypes">筛选类型 ▾</button>
+    <button type="button" class="btn sm ghost" id="toggleTypes">识别类型：默认已选 ▾</button>
     <button type="button" class="btn sm ghost" id="selAll">全选</button>
     <button type="button" class="btn sm ghost" id="selNone">清空</button>
     <button type="button" class="btn sm ghost" id="resetMarks">恢复全部位置</button>
   </div>
-  <div class="types-wrap" id="typesWrap"><div id="types"></div></div>
+</div>
+
+<div class="card types-card open" id="typesWrap">
+  <div id="types"></div>
+  <div class="chips" style="margin-top:12px">
+    <button type="button" class="chip addchip jsJumpTerms">＋ 添加自选字段（如公司简称）</button>
+  </div>
+</div>
+
+<div class="card termcard" id="termsCard" style="margin:14px 0">
+  <h2>添加漏识别的字段 <span class="pill acc" style="font-size:11px;vertical-align:middle">自动识别之外，在这里补</span></h2>
+  <p class="stat">没在下方高亮里出现的敏感内容（例如<b>公司简称</b>、项目别名），在这里手工填写。自选原文和别名会用于当前文书；选择“本案后续上传也使用”后，填写相同案件名称的新文书也会沿用。已经导出的文件不会自动修改，需重新上传。诉讼材料还应检查当事人、证人、案号、住址、账号、医疗信息和商业秘密；后两类通常需要手工添加。</p>
+  <div class="ab-row" style="flex-wrap:wrap;gap:8px">
+    <input id="termLabel" maxlength="12" placeholder="字段名，如当事人" style="padding:9px;min-width:130px">
+    <input id="termValue" maxlength="120" placeholder="原文，如北京某某公司" style="padding:9px;min-width:230px;flex:1">
+    <input id="termAliases" placeholder="别名，使用逗号分隔（可选）" style="padding:9px;min-width:230px;flex:1">
+    <select id="termScope" style="padding:9px"><option value="case">本案后续上传也使用</option><option value="document">只在当前文书使用</option></select>
+    <button type="button" class="btn sm" id="addTerm">添加并重新识别</button>
+  </div>
+  <div id="termList" class="stat" style="margin-top:9px"></div>
+  <div id="termError" class="result"></div>
 </div>
 
 <div class="compare">
@@ -884,10 +973,10 @@ REVIEW_BODY = r"""
     <span class="stat" id="stat"></span>
   </div>
   <div class="out-row">
-    <label class="chk locked" title="脱敏文件为必选项"><input type="checkbox" id="optDoc" checked disabled><span>脱敏文件 <b>*.docx</b></span></label>
-    <label class="chk" id="jsonWrap" title="取消勾选后只输出脱敏稿；映射材料仍嵌在文档内部，可随时还原，但请自行留意保管。"><input type="checkbox" id="optJson" checked><span>映射文件 <b>*.mapping.json</b>（还原用，建议保留）</span></label>
-    <button type="button" class="btn sm ghost" id="pickDir" title="选择一个文件夹后，两个文件会直接存进去，不再弹出下载框；建议选择「上传合同所在的文件夹」">选择保存文件夹…</button>
-    <span class="folder" id="dirState">未选择 → 下载到浏览器默认下载目录（建议选原合同所在文件夹）</span>
+    <label class="chk locked" title="脱敏文件为必选项"><input type="checkbox" id="optDoc" checked disabled><span>脱敏文件 <b>*.__OUTPUT_EXT__</b></span></label>
+    <label class="chk" id="jsonWrap" title="还原需要单独的 mapping.json；请安全保管，勿随脱敏稿外发。"><input type="checkbox" id="optJson" checked><span>映射文件 <b>*.mapping.json</b>（还原必需，请单独保管）</span></label>
+    <button type="button" class="btn sm ghost" id="pickDir" title="选择一个文件夹后，将所勾选的文件保存进去">选择保存文件夹…</button>
+    <span class="folder" id="dirState">未选择 → 下载到浏览器默认下载目录</span>
   </div>
   <div id="result" class="result"></div>
 </div>
@@ -895,11 +984,48 @@ REVIEW_BODY = r"""
 <script>
 var DATA = __DATA__;
 var enabled = new Set(DATA.types.map(function(t){return t.id;}));
+if(DATA.profile==='litigation'){
+  document.getElementById('optJson').checked=false;
+  document.getElementById('optJson').closest('label').title='外发模式默认只保存干净副本；需要还原时请另存映射文件并单独保管。';
+}
+if(!DATA.case_name){
+  document.getElementById('termScope').value='document';
+  document.getElementById('termScope').disabled=true;
+}
 var sev = 'all';
 var itemEnabled = new Map();
 DATA.blocks.forEach(function(b,bi){ (b.marks||[]).forEach(function(m,mi){ itemEnabled.set(bi+':'+mi,true); }); });
 
 function esc(s){ return String(s==null?'':s).replace(/[&<>"]/g,function(c){return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c];}); }
+
+function renderTerms(){
+  var box=document.getElementById('termList'); box.innerHTML='';
+  if(!(DATA.terms||[]).length){box.textContent='尚无自选字段';return;}
+  DATA.terms.forEach(function(t){
+    var row=document.createElement('div'); row.className='ln';
+    var label=document.createElement('span');
+    label.textContent=t.label+'（'+(t.scope==='document'?'只在本文':'本案后续沿用')+'）：'+(t.values||[]).join('、')+' ';
+    var del=document.createElement('button'); del.type='button'; del.className='btn sm ghost'; del.textContent='删除';
+    del.addEventListener('click',function(){changeTerm({action:'delete',id:t.id});});
+    row.appendChild(label);row.appendChild(del);box.appendChild(row);
+  });
+}
+async function changeTerm(payload){
+  var out=document.getElementById('termError');out.textContent='正在更新…';
+  try{
+    var r=await fetch('/api/term/__SID__',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    var j=await r.json(); if(!j.ok) throw new Error(j.error||'更新失败');
+    location.reload();
+  }catch(e){out.textContent=String(e.message||e);}
+}
+document.getElementById('addTerm').addEventListener('click',function(){
+  var label=document.getElementById('termLabel').value.trim();
+  var original=document.getElementById('termValue').value.trim();
+  var aliases=document.getElementById('termAliases').value.split(/[，,]/).map(function(v){return v.trim();}).filter(Boolean);
+  changeTerm({action:'add',scope:document.getElementById('termScope').value,
+              term:{label:label,values:[original].concat(aliases)}});
+});
+renderTerms();
 
 function renderTypes(){
   var box=document.getElementById('types'); box.innerHTML='';
@@ -929,7 +1055,7 @@ function renderTypes(){
     });
     box.appendChild(wrap);
   });
-  document.getElementById('toggleTypes').textContent='筛选类型 ▾ '+visible;
+  document.getElementById('toggleTypes').textContent='识别类型：已选 '+enabled.size+' 类 ▾';
 }
 
 function render(){
@@ -968,8 +1094,8 @@ function render(){
   });
   var lEl=document.getElementById('left'), rEl=document.getElementById('right');
   if(!DATA.blocks.length){
-    lEl.innerHTML='<div class="empty"><div class="big">🎉</div>没有识别到需要脱敏的敏感信息</div>';
-    rEl.innerHTML='<div class="empty"><div class="big">✨</div>文档保持原样即可</div>';
+    lEl.innerHTML='<div class="empty">未读取到可复核的正文</div>';
+    rEl.innerHTML='<div class="empty">不能判断是否含有敏感信息。请检查文件格式，或先完成本地 OCR 再上传。</div>';
   }else{
     lEl.innerHTML=left.join('');
     rEl.innerHTML=right.join('');
@@ -1004,6 +1130,16 @@ Array.prototype.forEach.call(document.querySelectorAll('.seg-btn'),function(b){
 });
 document.getElementById('toggleTypes').addEventListener('click',function(){
   document.getElementById('typesWrap').classList.toggle('open');
+});
+// 自选字段入口：滚到「添加漏识别的字段」卡片、高亮一次并聚焦「字段名」输入框
+function jumpToTerms(){
+  var card=document.getElementById('termsCard'); if(!card) return;
+  card.scrollIntoView({behavior:'smooth',block:'center'});
+  card.classList.remove('flash'); void card.offsetWidth; card.classList.add('flash');
+  var f=document.getElementById('termLabel'); if(f) f.focus({preventScroll:true});
+}
+Array.prototype.forEach.call(document.querySelectorAll('.jsJumpTerms'),function(b){
+  b.addEventListener('click',jumpToTerms);
 });
 document.getElementById('selAll').addEventListener('click',function(){
   enabled=new Set(DATA.types.map(function(t){return t.id;})); render();
@@ -1042,7 +1178,7 @@ pickBtn.addEventListener('click', async function(){
     }
     dirHandle = h;
     dirStateEl.className = 'folder on';
-    dirStateEl.innerHTML = '已选择文件夹：<code>' + esc(h.name) + '</code>（两个文件都会存到这里）';
+    dirStateEl.innerHTML = '已选择文件夹：<code>' + esc(h.name) + '</code>（仅保存所勾选的文件）';
     pickBtn.textContent = '更换文件夹…';
   }catch(e){ /* 用户取消选择，保持原状 */ }
 });
@@ -1117,7 +1253,7 @@ function renderSaved(sv, j){
   }
   return '<div class="saved">' +
     '<div class="ln">' + head + '</div>' + lines +
-    '<div class="ln" style="color:var(--faint)">提示：mapping.json 已同时嵌入脱敏稿内部，日后直接上传脱敏稿即可一键还原。</div>' +
+    '<div class="ln" style="color:var(--faint)">提示：还原须使用单独保存的 mapping.json；脱敏稿不含原文映射，请勿将映射文件外发。</div>' +
     '</div>';
 }
 
@@ -1169,15 +1305,34 @@ render();
 def build_review_page(sid: str, info: Dict[str, Any]) -> bytes:
     payload = info.get("review_payload") or {}
     report = info.get("report") or {}
-    types_n = len(report.get("items") or [])
+    types_n = len(payload.get("types") or [])
     occ_n = (report.get("summary") or {}).get("occurrences", 0)
     name = info.get("filename", "")
+    if info.get("profile") == "litigation":
+        scene = "当前用途：诉讼材料发给外部顾问或 AI；仅支持 DOCX 干净副本。案号和法院名称也是自动候选。"
+    else:
+        scene = "当前用途：合同等文书的内部复核；保留原有文档结构，不生成外发干净副本。"
+    case_name = info.get("case_name") or ""
+    if case_name:
+        inherited = len((info.get("case_data") or {}).get("terms") or [])
+        case_context = ("案件或项目名称：" + case_name + "；已加载 " + str(inherited) +
+                        " 条本案自选规则。以后上传时填写完全相同的名称，才能继续沿用；已导出的文件不会自动修改。")
+    else:
+        case_context = "未填写案件名称；新增的自选规则只用于当前文书。"
+    context = esc(scene + " " + case_context)
+    warnings = payload.get("warnings") or []
+    warning_html = ('<div class="alert err" style="margin-bottom:14px"><span>解析提示：<br>' +
+                    '<br>'.join(esc(str(w)) for w in warnings) + '</span></div>') if warnings else ''
+    output_ext = name.rsplit(".", 1)[-1].lower() if "." in name else "txt"
     data_json = json.dumps(payload, ensure_ascii=False).replace("<", "\\u003c").replace(">", "\\u003e")
 
     body = (REVIEW_BODY
             .replace("__FILENAME__", esc(name))
             .replace("__TYPES__", str(types_n))
             .replace("__OCC__", str(occ_n))
+            .replace("__REVIEW_CONTEXT__", context)
+            .replace("__PARSE_WARNINGS__", warning_html)
+            .replace("__OUTPUT_EXT__", esc(output_ext))
             .replace("__SID__", esc(sid))
             .replace("__DATA__", data_json))
     return html_doc("左右对比 · " + name, body,
@@ -1185,6 +1340,110 @@ def build_review_page(sid: str, info: Dict[str, Any]) -> bytes:
 
 
 # =============================================================== 失效页 =======
+
+# =========================================================== 历史记录页 =====
+# 内容全部来自本机磁盘（sessions/），不联网、不加载任何外部资源。
+# 页面本身只在「服务重启后旧会话链接失效」这一痛点上做文章：列表 / 下载 / 删除。
+
+HISTORY_BODY = r"""
+<div class="page-head">
+  <div>
+    <h1>历史记录</h1>
+    <div class="meta">
+      <span class="pill">本机留存 __COUNT__ 次</span>
+      <span class="pill ghost">占用 __TOTAL__</span>
+      <span class="pill ghost">全部解析均在本机完成，文件不外传</span>
+    </div>
+  </div>
+</div>
+
+<div class="alert info">
+  <span class="i">🔒</span>
+  <span><b>这些记录只存在本机</b>：原件、映射与输出都在本地会话目录里，没有上传到任何服务器。含明文的记录可单独删除，删除后不可恢复。</span>
+</div>
+
+<div class="card">
+__ROWS__
+</div>
+
+<p class="stat" style="margin-top:16px">
+  <a class="btn sm" href="/">← 回到首页</a>
+</p>
+
+<script>
+async function delHistory(sid){
+  if(!confirm('确定删除这条记录吗？本机保存的原件与映射会一并删除，且不可恢复。')) return;
+  try{
+    var r = await fetch('/api/history/delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({sid:sid})});
+    var j = await r.json();
+    if(j.ok){ location.reload(); }
+    else{ alert('删除失败：'+(j.error||'未知错误')); }
+  }catch(e){ alert('请求失败：'+String(e)); }
+}
+</script>
+"""
+
+
+def _fmt_size(n) -> str:
+    try:
+        v = float(n)
+    except Exception:
+        return "—"
+    for unit in ("B", "KB", "MB", "GB"):
+        if v < 1024 or unit == "GB":
+            return ("%.0f %s" % (v, unit)) if unit == "B" else ("%.1f %s" % (v, unit))
+        v /= 1024
+    return "—"
+
+
+def _hist_rows(rows) -> str:
+    if not rows:
+        return ('<div class="hist-empty">还没有处理记录。上传一份文书完成脱敏后，'
+                '这里会列出本机留存的记录。</div>')
+    out = []
+    for r in rows:
+        sid = esc(str(r.get("sid") or ""))
+        name = esc(str(r.get("filename") or "(未命名)"))
+        bits = []
+        if r.get("when"):
+            bits.append(esc(str(r["when"])))
+        if r.get("count") is not None:
+            bits.append("替换 %d 处" % r["count"])
+        if r.get("redacted"):
+            bits.append("已脱敏")
+        if r.get("restored"):
+            bits.append("已还原")
+        if r.get("live"):
+            bits.append("本次运行内")
+        bits.append("会话 " + sid)
+        bits.append(_fmt_size(r.get("size") or 0))
+        acts = []
+        for label, fn in (r.get("files") or []):
+            url = "/history/download/%s/%s" % (sid, urllib.parse.quote(str(fn)))
+            cls = "btn sm" if label in ("脱敏稿", "还原稿") else "btn sm ghost"
+            acts.append('<a class="%s" href="%s">%s</a>' % (cls, esc(url), esc(label)))
+        acts.append('<button class="btn sm warn" type="button" onclick="delHistory(\'%s\')">删除</button>' % sid)
+        out.append(
+            '<div class="histrow">'
+            '<div class="hist-main">'
+            '<div class="hist-name" title="%s">%s</div>'
+            '<div class="hist-sub">%s</div>'
+            '</div>'
+            '<div class="hist-act">%s</div>'
+            '</div>' % (name, name, " · ".join(bits), "".join(acts))
+        )
+    return "".join(out)
+
+
+def build_history_page(data: Dict[str, Any]) -> bytes:
+    data = data or {}
+    rows = data.get("rows") or []
+    body = (HISTORY_BODY
+            .replace("__COUNT__", str(data.get("count", len(rows))))
+            .replace("__TOTAL__", _fmt_size(data.get("total_bytes", 0)))
+            .replace("__ROWS__", _hist_rows(rows)))
+    return html_doc("历史记录", body)
+
 
 def build_expired_page() -> bytes:
     body = """

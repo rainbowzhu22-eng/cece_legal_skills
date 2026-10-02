@@ -57,6 +57,7 @@ from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 # 复用 detector 的纯离线算法、校验位、类型元数据、文档解析、识别引擎。
 import contract_sensitive_detector as D
+import contract_review_ext as review_ext
 from contract_sensitive_detector import (
     TYPE_META,
     Block,
@@ -111,6 +112,8 @@ class BaseRedactor:
         self.source = source
         self.full_text = full_text
         self.ops = sorted(ops, key=lambda o: o.start, reverse=True)  # 从后往前改
+        # R6：因检测/改写两侧段落文本口径不一致而被 fail-safe 跳过的段落（宁漏不错）
+        self.unstable_paragraphs: List[Dict[str, Any]] = []
 
     # 子类必须实现
     def rewrite(self, dst: str) -> Dict[str, Any]:
@@ -212,17 +215,16 @@ class DocxRedactor(BaseRedactor):
         # 段落元素列表（与 detector 的 block 顺序对齐）
         # detector 在 extract_docx 里**跳过空段落**，所以这里也要跳过，
         # 否则 paragraph index 会对不上 detector 的 block index。
+        # R6：判空一并改用 docx_para_text，与检测侧口径完全一致。
         para_seq: List[Any] = []
         for p in doc.element.body.iter(qn("w:p")):
-            text = "".join(t.text or "" for t in p.iter(self.W_NS + "t"))
-            if text.strip():
+            if D.docx_para_text(p).strip():
                 para_seq.append(p)
         for sec in doc.sections:
             for part in (sec.header, sec.footer):
                 try:
                     for p in part._element.iter(qn("w:p")):
-                        text = "".join(t.text or "" for t in p.iter(self.W_NS + "t"))
-                        if text.strip():
+                        if D.docx_para_text(p).strip():
                             para_seq.append(p)
                 except Exception:
                     pass
@@ -237,9 +239,18 @@ class DocxRedactor(BaseRedactor):
 
         # 段落级 _replace_in_paragraph 已经写回 .text，最后保存
         doc.save(dst)
+        warnings: List[Dict[str, Any]] = []
+        if self.unstable_paragraphs:
+            warnings.append({
+                "code": "PARAGRAPH_TEXT_MISMATCH",
+                "count": len(self.unstable_paragraphs),
+                "detail": "检测与改写两侧段落文本口径不一致，已跳过这些段落（宁漏不错）",
+                "paragraphs": self.unstable_paragraphs[:10],
+            })
         return {
             "applied": len(applied),
             "skipped": len(skipped) + (len(self.ops) - len(applied) - len(skipped)),
+            "warnings": warnings,
         }
 
     # ---- 段落内字符级回填 ----
@@ -250,25 +261,17 @@ class DocxRedactor(BaseRedactor):
         if not ts:
             return []
 
-        # 段落纯文本
-        para_text = "".join(t.text or "" for t in ts)
-        # 漂移容忍：若不一致，取最长公共前缀
+        # 段落纯文本：与检测侧**同一口径**（tab→空格、br→换行）。
+        para_text_full, units = D.docx_para_units(para_elem)
+        para_text = para_text_full.rstrip("\n")
+
+        # fail-safe（R6）：两侧口径必须一致。历史缺陷正是「检测折算 tab、改写忽略 tab」，
+        # 使替换区间整体右移——明文残留（如手机号前 5 位）且正文被破坏，比漏检更危险。
+        # 一旦不一致就整段跳过：漏检可见、可人工补录。
         if para_text != block_text:
-            common = 0
-            while (common < min(len(para_text), len(block_text))
-                   and para_text[common] == block_text[common]):
-                common += 1
-            if common == 0:
-                return []
-            # 把 block_text 截到与 para_text 的公共部分
-            # ops 也需要重新 clamp（粗略处理：跳过超出范围的 op）
-        # 计算字符 offset → (t_index, char_offset_in_t)
-        # 这里我们用一个简单的「字符 → t 节点」映射
-        char_map: List[Tuple[int, int]] = []  # 每个字符对应的 (ti, j)
-        for ti, t in enumerate(ts):
-            s = t.text or ""
-            for j in range(len(s)):
-                char_map.append((ti, j))
+            self.unstable_paragraphs.append(
+                {"paragraph_text": para_text[:80], "detector_text": block_text[:80]})
+            return []
 
         applied: List[RedactOp] = []
         # 从后往前处理，避免前面的 offset 偏移影响后面的判断
@@ -277,27 +280,11 @@ class DocxRedactor(BaseRedactor):
         pieces: List[List[str]] = [list(t.text or "") for t in ts]
 
         for op in ops_sorted:
-            if op.end > len(char_map):
+            if op.start < 0 or op.end > len(para_text):
                 continue
-            if op.start < 0:
-                continue
-            # 把 [start, end) 切成「若干连续段」，每段都属于同一个 <w:t>
-            segments: List[Tuple[int, int, int]] = []  # (ti, l, r) — 在 ts[ti] 中的字符范围
-            cur_ti = char_map[op.start][0]
-            seg_l = char_map[op.start][1]
-            seg_r = seg_l
-            for g in range(op.start, op.end):
-                ti, j = char_map[g]
-                if ti != cur_ti:
-                    segments.append((cur_ti, seg_l, seg_r + 1))
-                    cur_ti = ti
-                    seg_l = j
-                    seg_r = j
-                else:
-                    seg_r = j
-            segments.append((cur_ti, seg_l, seg_r + 1))
-
-            # 把 replacement 按各段原字符长度比例切分
+            # [start, end) 切成同一 <w:t> 内的连续段；tab/br 保留位不参与替换，
+            # 因此制表符、换行、填空下划线的数量与位置保持不变。
+            segments: List[Tuple[int, int, int]] = _segments_in_units(units, op.start, op.end)
             total_len = sum(r - l for _, l, r in segments)
             n_seg = len(segments)
             if total_len == 0 or n_seg == 0:
@@ -305,12 +292,8 @@ class DocxRedactor(BaseRedactor):
             if n_seg == 1:
                 parts = [op.replacement]
             else:
-                # 按段长度比例切分 replacement（用字符数比例，保证视觉宽度近似）
-                # 先给首段和末段至少 1 个字符
-                rep = op.replacement
                 seg_lens = [r - l for _, l, r in segments]
-                # 把 rep 切成 n 段，长度按 seg_lens 比例
-                parts = self._split_replacement(rep, seg_lens)
+                parts = self._split_replacement(op.replacement, seg_lens)
 
             # 写入各 <w:t>
             for (ti, l, r), part in zip(segments, parts):
@@ -548,9 +531,7 @@ def build_ops_from_report(report: Dict[str, Any], enabled_types: set,
             ))
 
     if keep and not ops:
-        # 位置白名单一处也没对上（文档被改过 / 检测参数变了）→ 退化为按类型全量。
-        # 宁可多打码，也不要静默产出一份"看起来脱敏了、其实一个字没换"的文件。
-        return build_ops_from_report(report, enabled_types, None)
+        raise ValueError("勾选的位置与当前文档不匹配，请重新上传并复核")
 
     full_text = report.get("_full_text", "")
     return ops, full_text
@@ -586,6 +567,10 @@ def redact_file(source: str,
                 allowlist: Optional[Sequence[str]] = None,
                 write_log: bool = True,
                 restore_mode: bool = False,
+                custom_terms: Optional[List[Dict[str, Any]]] = None,
+                case_numbers: Optional[Dict[Tuple[str, str], int]] = None,
+                external_clean: bool = False,
+                litigation_profile: bool = False,
                 ) -> Dict[str, Any]:
     """对单个文件执行「检测 → 选择 → 改写」的端到端流程。
 
@@ -605,15 +590,21 @@ def redact_file(source: str,
     extra_specs: List = []
     if rules_path:
         extra_specs = load_rules_md(rules_path)
+    if litigation_profile:
+        extra_specs.extend(review_ext.litigation_specs())
 
     settings = Settings(min_confidence=min_confidence, min_severity=min_severity)
+    settings.extra_specs = extra_specs
     if allowlist:
         settings.allowlist = set(allowlist)
 
     # 2) 用 detector 跑一次（保证报告与 detector 完全对齐）
     engine = DetectorEngine(settings)
     doc = _load_doc(source)
+    D.require_pdf_text(doc)
     candidates = engine.scan_document(doc)
+    if custom_terms:
+        candidates = review_ext.add_exact_terms(doc, candidates, custom_terms)
 
     # 把 allowlist 过滤也加进去
     if settings.allowlist:
@@ -634,6 +625,8 @@ def redact_file(source: str,
 
     # 4) 构造 ops
     ops, full_text = build_ops_from_report(report, enabled_types, sel_items)
+    if external_clean and not ops:
+        raise ValueError("没有可替换的内容，已停止外发导出")
 
     # 4.b) restore_mode：把所有 replacement 换成 [label#N]，并累计 mapping
     #      编号规则：同一个实体（同一个人/企业，含简称）在整篇里**共用同一个编号**，
@@ -641,7 +634,7 @@ def redact_file(source: str,
     #      EntityNumberer 统一分配，保证与复核页、mapping.json 三处完全一致。
     mapping_records: List[Dict[str, Any]] = []
     if restore_mode:
-        numberer = D.EntityNumberer(report.get("items") or [])
+        numberer = D.EntityNumberer(report.get("items") or [], case_numbers)
         new_ops: List[RedactOp] = []
         for op in ops:
             # 查号用的是「实体代表值」而非本次出现的字面文本，
@@ -693,8 +686,19 @@ def redact_file(source: str,
 
     # 7) 改写
     result = redactor.rewrite(out_path)
+    if external_clean:
+        try:
+            if ext != ".docx":
+                raise ValueError("外发干净副本目前仅支持 Word .docx")
+            if result["skipped"]:
+                raise ValueError("有 %d 处选中内容未成功替换，已停止外发导出" % result["skipped"])
+            review_ext.clean_docx(out_path, [op.value for op in ops])
+        except Exception:
+            if os.path.exists(out_path):
+                os.unlink(out_path)
+            raise
 
-    # 7.b) restore_mode：写 mapping.json + 把 mapping 嵌入 docx (customXml)
+    # 7.b) restore_mode：单独写 mapping.json；脱敏件不得携带原文映射。
     mapping_path: Optional[str] = None
     embedded_ok = False
     if restore_mode:
@@ -716,9 +720,6 @@ def redact_file(source: str,
         }
         with open(mapping_path, "w", encoding="utf-8") as f:
             json.dump(mapping_payload, f, ensure_ascii=False, indent=2)
-        # docx 才支持嵌入 mapping；pdf / txt 仅落在外部文件
-        if ext == ".docx":
-            embedded_ok = embed_mapping_in_docx(out_path, mapping_payload)
 
     # 8) 写审计日志
     log_path = None
@@ -923,6 +924,36 @@ def _split_replacement_static(rep: str, seg_lens: List[int]) -> List[str]:
     return out
 
 
+def _segments_in_units(units: List[Tuple], s: int, e: int) -> List[Tuple[int, int, int]]:
+    """把文本区间 [s, e) 切成若干「同一 <w:t> 内的连续字符段」。
+
+    ``units`` 由 ``docx_para_units`` 给出，与段落文本逐字对齐。
+    ('keep', ...) 是 tab/br 折算出的不可写保留位：它会**中断**当前段，
+    但自身不参与替换——替换后制表符/换行数量与位置保持不变。
+    """
+    segments: List[Tuple[int, int, int]] = []
+    cur_ti = None
+    seg_l = seg_r = 0
+    for g in range(s, e):
+        u = units[g]
+        if u[0] != "t":
+            if cur_ti is not None:
+                segments.append((cur_ti, seg_l, seg_r + 1))
+                cur_ti = None
+            continue
+        ti, j = u[1], u[2]
+        if cur_ti is None:
+            cur_ti, seg_l, seg_r = ti, j, j
+        elif ti == cur_ti and j == seg_r + 1:
+            seg_r = j
+        else:
+            segments.append((cur_ti, seg_l, seg_r + 1))
+            cur_ti, seg_l, seg_r = ti, j, j
+    if cur_ti is not None:
+        segments.append((cur_ti, seg_l, seg_r + 1))
+    return segments
+
+
 def _replace_in_paragraph_with_map(para_elem, pattern: "re.Pattern[str]",
                                     seqs: Dict[str, List[str]],
                                     cursor: Dict[str, int], W_NS: str) -> int:
@@ -938,16 +969,11 @@ def _replace_in_paragraph_with_map(para_elem, pattern: "re.Pattern[str]",
     ts = list(para_elem.iter(W_NS + "t"))
     if not ts:
         return 0
-    para_text = "".join(t.text or "" for t in ts)
+    # R6：与检测侧同一口径（tab→空格、br→换行），否则还原时定位不到占位符。
+    para_text_full, units = D.docx_para_units(para_elem)
+    para_text = para_text_full.rstrip("\n")
     if not pattern.search(para_text):
         return 0
-
-    # 字符 → (ti, j_in_t) 映射
-    char_map: List[Tuple[int, int]] = []
-    for ti, t in enumerate(ts):
-        s = t.text or ""
-        for j in range(len(s)):
-            char_map.append((ti, j))
 
     pieces: List[List[str]] = [list(t.text or "") for t in ts]
     matches = list(pattern.finditer(para_text))
@@ -965,20 +991,7 @@ def _replace_in_paragraph_with_map(para_elem, pattern: "re.Pattern[str]",
     for m, repl in reversed(list(zip(matches, repls))):
         s, e = m.start(), m.end()
 
-        segments: List[Tuple[int, int, int]] = []
-        cur_ti = char_map[s][0]
-        seg_l = char_map[s][1]
-        seg_r = seg_l
-        for g in range(s + 1, e):
-            ti, j = char_map[g]
-            if ti != cur_ti:
-                segments.append((cur_ti, seg_l, seg_r + 1))
-                cur_ti = ti
-                seg_l = j
-                seg_r = j
-            else:
-                seg_r = j
-        segments.append((cur_ti, seg_l, seg_r + 1))
+        segments = _segments_in_units(units, s, e)
 
         if len(segments) == 1:
             parts = [repl]
@@ -1049,18 +1062,16 @@ class DocxRestorer:
         items = sorted(self.seqs.items(), key=lambda kv: -len(kv[0]))
         pattern = re.compile("|".join(re.escape(ph) for ph, _ in items))
 
-        # 收集所有段落（正文 + 页眉页脚）
+        # 收集所有段落（正文 + 页眉页脚）；R6：口径与检测/改写一致
         para_seq: List[Any] = []
         for p in doc.element.body.iter(qn("w:p")):
-            text = "".join(t.text or "" for t in p.iter(self.W_NS + "t"))
-            if text.strip():
+            if D.docx_para_text(p).strip():
                 para_seq.append(p)
         for sec in doc.sections:
             for part in (sec.header, sec.footer):
                 try:
                     for p in part._element.iter(qn("w:p")):
-                        text = "".join(t.text or "" for t in p.iter(self.W_NS + "t"))
-                        if text.strip():
+                        if D.docx_para_text(p).strip():
                             para_seq.append(p)
                 except Exception:
                     pass
@@ -1069,14 +1080,12 @@ class DocxRestorer:
         # 替换前先采集完整文本，便于统计「文档中没有的占位符」
         before_text_parts: List[str] = []
         for p in doc.element.body.iter(qn("w:p")):
-            before_text_parts.append(
-                "".join(t.text or "" for t in p.iter(self.W_NS + "t")))
+            before_text_parts.append(D.docx_para_text(p))
         for sec in doc.sections:
             for part in (sec.header, sec.footer):
                 try:
                     for p in part._element.iter(qn("w:p")):
-                        before_text_parts.append(
-                            "".join(t.text or "" for t in p.iter(self.W_NS + "t")))
+                        before_text_parts.append(D.docx_para_text(p))
                 except Exception:
                     pass
         before_text = "\n".join(before_text_parts)

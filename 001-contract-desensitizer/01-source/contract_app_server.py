@@ -20,6 +20,7 @@ contract_app_server.py
 from __future__ import annotations
 
 import html as _html
+import hashlib
 import io
 import json
 import os
@@ -36,6 +37,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 # 复用 detector / redactor 的离线算法、改写器、还原器
 import contract_sensitive_detector as D
+import contract_review_ext as review_ext
 from contract_sensitive_detector import (
     TYPE_META,
     Settings,
@@ -56,7 +58,7 @@ from contract_redactor import (
 
 
 APP_NAME = "contract_app_server"
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.2.3"
 DEFAULT_PORT = 18800
 MAX_UPLOAD_BYTES = 100 * 1024 * 1024  # 100 MB
 
@@ -69,6 +71,7 @@ from contract_app_ui import (          # noqa: E402
     build_workspace_body,
     build_review_page,
     build_expired_page,
+    build_history_page,
     loading_doc,
     FAVICON_SVG,
 )
@@ -84,6 +87,32 @@ class AppState:
         os.makedirs(work_dir, exist_ok=True)
         self.work_dir = work_dir
         self.uploads: Dict[str, Dict[str, Any]] = {}
+        self.case_lock = threading.RLock()
+
+    def case_path(self, name: str) -> str:
+        digest = hashlib.sha256(name.encode("utf-8")).hexdigest()
+        return os.path.join(self.work_dir, "cases", digest + ".json")
+
+    def load_case(self, name: str) -> Dict[str, Any]:
+        if not name:
+            return {"terms": [], "numbers": []}
+        with self.case_lock:
+            path = self.case_path(name)
+            if not os.path.exists(path):
+                return {"terms": [], "numbers": []}
+            with open(path, encoding="utf-8") as f:
+                return json.load(f)
+
+    def save_case(self, name: str, data: Dict[str, Any]) -> None:
+        if not name:
+            return
+        with self.case_lock:
+            path = self.case_path(name)
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            tmp = path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, path)
 
     def new_session(self, sid: str, info: Dict[str, Any]) -> None:
         self.uploads[sid] = info
@@ -106,22 +135,29 @@ def _ext_of(name: str) -> str:
     return os.path.splitext(name)[1].lower()
 
 
-def _run_detector(path: str) -> Dict[str, Any]:
+def _rules_path() -> Optional[str]:
+    root = os.path.dirname(os.path.abspath(__file__))
+    for path in (os.path.join(root, "脱敏规则清单.md"),
+                 os.path.join(os.path.dirname(root), "references", "脱敏规则清单.md")):
+        if os.path.exists(path):
+            return path
+    return None
+
+
+def _run_detector(path: str, terms=None, litigation=False) -> Dict[str, Any]:
     """对刚上传的路径跑一次 detector，返回 (doc, candidates, report, report_full_text)。
 
     使用 detector 默认配置 + 项目同目录的 rules markdown。
     """
-    rules_path = os.path.join(
-        os.path.dirname(os.path.abspath(__file__)),
-        "脱敏规则清单.md",
-    )
+    rules_path = _rules_path()
     extra_specs: List = []
-    if os.path.exists(rules_path):
+    if rules_path:
         try:
             extra_specs = load_rules_md(rules_path)
         except Exception:
             extra_specs = []
     settings = Settings(min_confidence=0.5, min_severity="low")
+    settings.extra_specs = extra_specs + (review_ext.litigation_specs() if litigation else [])
     if extra_specs:
         from contract_sensitive_detector import TYPE_META as _TM, TypeMeta
         import dataclasses as _dc
@@ -137,7 +173,10 @@ def _run_detector(path: str) -> Dict[str, Any]:
                     _TM[s.type_id] = _dc.replace(cur, **kw)
     engine = DetectorEngine(settings)
     doc = load_document(path, include_headers=True)
+    D.require_pdf_text(doc)
     candidates = engine.scan_document(doc)
+    if terms:
+        candidates = review_ext.add_exact_terms(doc, candidates, terms)
     report = build_report(doc, candidates, settings)
     full_raw = "\n".join(b.text.rstrip("\n") for b in doc.blocks)
     return {
@@ -204,8 +243,168 @@ class AppHandler(BaseHTTPRequestHandler):
             body = body.encode("utf-8")
         self._send(code, "text/html; charset=utf-8", body)
 
+    def _local_request_allowed(self, mutation: bool = False) -> bool:
+        """阻断 DNS 重绑定及来自其他网页的本机写请求。"""
+        host = (self.headers.get("Host") or "").lower()
+        if not re.fullmatch(r"(?:127\.0\.0\.1|localhost)(?::[0-9]{1,5})?", host):
+            return False
+        if mutation:
+            origin = self.headers.get("Origin")
+            if origin:
+                try:
+                    parsed = urllib.parse.urlparse(origin)
+                    valid_origin = (parsed.scheme == "http" and
+                                    parsed.hostname in ("127.0.0.1", "localhost") and
+                                    parsed.port == self.server.server_port)
+                except ValueError:
+                    valid_origin = False
+                if not valid_origin:
+                    return False
+        return True
+
+    # ---- 历史记录（本地留档，只读磁盘）------------------------------------
+    # 设计要点：全部走**磁盘**，不依赖内存会话表 self.state.uploads。
+    # 后者是进程内字典，服务一重启即清空；若历史页也依赖它，"重启后依然能查"
+    # 这个存在意义就没了（旧链接会全部 404）。
+    _SID_RE = re.compile(r"^[0-9a-f]{12}$")
+
+    @staticmethod
+    def _hist_origin_name(sess: str) -> str:
+        """会话目录里那份「原件」的文件名（mapping 缺失时兜底显示）。"""
+        try:
+            for fn in sorted(os.listdir(sess)):
+                fp = os.path.join(sess, fn)
+                if os.path.isfile(fp) and os.path.splitext(fn)[1].lower() in (
+                        ".docx", ".pdf", ".txt", ".md"):
+                    return fn
+        except OSError:
+            pass
+        return ""
+
+    @staticmethod
+    def _hist_meta(sess: str) -> Dict[str, Any]:
+        """尽量从 out/*.mapping.json 读出 文件名 / 生成时间 / 替换处数。"""
+        meta: Dict[str, Any] = {"filename": "", "when": "", "count": None}
+        out_dir = os.path.join(sess, "out")
+        if not os.path.isdir(out_dir):
+            return meta
+        for fn in sorted(os.listdir(out_dir)):
+            if not fn.endswith(".mapping.json"):
+                continue
+            try:
+                with open(os.path.join(out_dir, fn), encoding="utf-8") as f:
+                    d = json.load(f)
+                src = d.get("source") or {}
+                meta["filename"] = src.get("name") or d.get("filename") or ""
+                meta["when"] = str(d.get("generated_at") or "")[:19].replace("T", " ")
+                items = d.get("items")
+                if isinstance(items, list):
+                    meta["count"] = len(items)
+            except Exception:
+                pass
+            break
+        return meta
+
+    def _history_data(self) -> Dict[str, Any]:
+        """扫描本地会话目录，列出历次处理记录（只读磁盘，重启后依然可用）。"""
+        root = os.path.abspath(self.state.work_dir)
+        rows: List[Dict[str, Any]] = []
+        total = 0
+        try:
+            names = os.listdir(root)
+        except OSError:
+            names = []
+        for name in names:
+            if not self._SID_RE.match(name):
+                continue
+            sess = os.path.join(root, name)
+            if not os.path.isdir(sess):
+                continue
+            out_dir = os.path.join(sess, "out")
+            files: List[Tuple[str, str]] = []
+            redacted = restored = False
+            if os.path.isdir(out_dir):
+                for fn in sorted(os.listdir(out_dir)):
+                    if not os.path.isfile(os.path.join(out_dir, fn)):
+                        continue
+                    if fn.endswith(".redaction.log"):
+                        files.append(("日志", fn))
+                    elif fn.endswith(".mapping.json"):
+                        files.append(("映射", fn))
+                    elif "_还原" in fn:
+                        files.append(("还原稿", fn))
+                        restored = True
+                    elif "_脱敏" in fn:
+                        files.append(("脱敏稿", fn))
+                        redacted = True
+            meta = self._hist_meta(sess)
+            size = 0
+            for dp, _dn, fns in os.walk(sess):
+                for fn in fns:
+                    try:
+                        size += os.path.getsize(os.path.join(dp, fn))
+                    except OSError:
+                        pass
+            total += size
+            when = meta["when"]
+            if not when:
+                try:
+                    when = datetime.fromtimestamp(
+                        os.path.getmtime(sess)).strftime("%Y-%m-%d %H:%M:%S")
+                except OSError:
+                    when = ""
+            rows.append({
+                "sid": name,
+                "filename": meta["filename"] or self._hist_origin_name(sess) or "(未命名)",
+                "when": when,
+                "count": meta["count"],
+                "files": files,
+                "redacted": redacted,
+                "restored": restored,
+                "size": size,
+                "live": bool(self.state.get(name)),
+            })
+        rows.sort(key=lambda r: r["when"] or "", reverse=True)
+        return {"rows": rows, "count": len(rows), "total_bytes": total}
+
+    def _history_file(self, sid: str, name: str) -> Optional[str]:
+        """按磁盘定位历史产物；不查内存会话表，故服务重启后仍能下载。"""
+        if not self._SID_RE.match(sid or ""):
+            return None
+        out_dir = os.path.abspath(os.path.join(self.state.work_dir, sid, "out"))
+        safe_root = out_dir + os.sep
+        target = os.path.abspath(os.path.join(out_dir, name))
+        if not (target + os.sep).startswith(safe_root):
+            return None
+        if not os.path.isfile(target):
+            return None
+        return target
+
+    def _delete_history(self, sid: str) -> Tuple[bool, str]:
+        """删除一条历史记录。sid 白名单 + 路径校验；cases/ 及其它目录一律拒绝。"""
+        if not self._SID_RE.match(sid or ""):
+            return False, "非法的会话编号"
+        root = os.path.abspath(self.state.work_dir)
+        target = os.path.abspath(os.path.join(root, sid))
+        if not (target + os.sep).startswith(root + os.sep):
+            return False, "路径越界"
+        if not os.path.isdir(target):
+            return False, "记录不存在或已被删除"
+        try:
+            shutil.rmtree(target)
+        except Exception as exc:
+            return False, "删除失败：%s（文件可能正被 Word 等程序占用）" % exc
+        try:
+            self.state.uploads.pop(sid, None)
+        except Exception:
+            pass
+        return True, ""
+
     # ---- GET ----
     def do_GET(self):
+        if not self._local_request_allowed():
+            self._send_json({"ok": False, "error": "invalid local host"}, 403)
+            return
         u = urllib.parse.urlparse(self.path)
         path = u.path
         qs = urllib.parse.parse_qs(u.query)
@@ -272,11 +471,41 @@ class AppHandler(BaseHTTPRequestHandler):
                 return
             self._send_html(build_review_page(sid, info))
             return
+        if path == "/history":
+            self._send_html(build_history_page(self._history_data()))
+            return
+        if path.startswith("/history/download/"):
+            # 磁盘直读 —— 不经内存会话表，服务重启后旧记录依然可下载
+            parts = path.split("/")
+            if len(parts) < 5:
+                self._send_json({"ok": False, "error": "bad download path"}, 400)
+                return
+            target = self._history_file(parts[3],
+                                        urllib.parse.unquote("/".join(parts[4:])))
+            if not target:
+                self._send_json({"ok": False, "error": "file not found"}, 404)
+                return
+            with open(target, "rb") as f:
+                data = f.read()
+            ctype = "application/octet-stream"
+            ext = os.path.splitext(target)[1].lower()
+            if ext == ".docx":
+                ctype = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            elif ext == ".json":
+                ctype = "application/json; charset=utf-8"
+            elif ext == ".log":
+                ctype = "text/plain; charset=utf-8"
+            disp = 'attachment; filename="%s"' % urllib.parse.quote(os.path.basename(target))
+            self._send(200, ctype, data, [("Content-Disposition", disp)])
+            return
 
         self._send_json({"ok": False, "error": "GET not found"}, 404)
 
     # ---- POST ----
     def do_POST(self):
+        if not self._local_request_allowed(mutation=True):
+            self._send_json({"ok": False, "error": "invalid request origin"}, 403)
+            return
         u = urllib.parse.urlparse(self.path)
         path = u.path
         ctype = self.headers.get("Content-Type", "")
@@ -322,6 +551,18 @@ class AppHandler(BaseHTTPRequestHandler):
             return out
 
         # --- 路由 ---
+        if path == "/api/history/delete":
+            if ctype.split(";", 1)[0].strip().lower() != "application/json":
+                self._send_json({"ok": False, "error": "JSON request required"}, 415)
+                return
+            try:
+                payload = json.loads(body_bytes.decode("utf-8") or "{}")
+            except Exception:
+                payload = {}
+            ok, err = self._delete_history(str((payload or {}).get("sid") or ""))
+            self._send_json({"ok": True} if ok else {"ok": False, "error": err})
+            return
+
         if path == "/api/shutdown":
             # 供网页右上角「退出」按钮调用：优雅停止本地服务并释放端口
             self._send_json({"ok": True, "message": "shutting down"})
@@ -354,6 +595,13 @@ class AppHandler(BaseHTTPRequestHandler):
                 mode = (mp.get("mode", {}).get("data") or b"redact").decode("utf-8").strip().lower()
                 if mode not in ("redact", "restore"):
                     mode = "redact"
+                profile = (mp.get("profile", {}).get("data") or b"contract").decode("utf-8").strip()
+                if profile not in ("contract", "litigation"):
+                    profile = "contract"
+                case_name = (mp.get("case_name", {}).get("data") or b"").decode("utf-8").strip()
+                if len(case_name) > 80 or any(c in case_name for c in "\r\n"):
+                    self._send_json({"ok": False, "error": "案件名称不能超过 80 字且不能换行"}, 400)
+                    return
                 if not fld or not fld.get("data"):
                     self._send_json({"ok": False, "error": "未选择文件"}, 400)
                     return
@@ -376,6 +624,9 @@ class AppHandler(BaseHTTPRequestHandler):
                     except Exception:
                         pass
                     self._send_json({"ok": False, "error": f"暂不支持 {ext} 文件"}, 400)
+                    return
+                if mode == "redact" and profile == "litigation" and ext != ".docx":
+                    self._send_json({"ok": False, "error": "诉讼外发干净副本目前仅支持 .docx Word 文件"}, 400)
                     return
 
                 # 检测文件是否已含占位符
@@ -416,7 +667,9 @@ class AppHandler(BaseHTTPRequestHandler):
                     return
 
                 # ---- redact mode ----
-                run = _run_detector(input_path)
+                case_data = self.state.load_case(case_name)
+                terms = [dict(t, scope="case") for t in case_data.get("terms", [])]
+                run = _run_detector(input_path, terms, profile == "litigation")
                 report = run["report"]
                 doc = run["doc"]
                 full_raw = run["full_raw"]
@@ -426,7 +679,12 @@ class AppHandler(BaseHTTPRequestHandler):
                 write_mapping(report, mapping_path)
 
                 # 构造 review payload
-                review_payload = _build_review_payload(report, doc.blocks)
+                case_data["numbers"], numbers = review_ext.assign_case_numbers(
+                    report, case_data.get("numbers", []))
+                self.state.save_case(case_name, case_data)
+                review_payload = _build_review_payload(report, doc.blocks, numbers, terms)
+                review_payload["profile"] = profile
+                review_payload["case_name"] = case_name
 
                 # 找 sibling mapping（detector 模式下不会用到，先留着）
                 sib_mapping = find_sibling_mapping(input_path) or mapping_path
@@ -440,10 +698,15 @@ class AppHandler(BaseHTTPRequestHandler):
                     "doc": doc,
                     "full_raw": full_raw,
                     "review_payload": review_payload,
+                    "profile": profile,
+                    "case_name": case_name,
+                    "case_data": case_data,
+                    "local_terms": [],
+                    "case_numbers": numbers,
                     "mapping_path": mapping_path,
                     "sibling_mapping": sib_mapping,
                     "looks_redacted": is_redacted,
-                    "counts": {"types": len(report["items"]),
+                    "counts": {"types": len({it["type"] for it in report["items"]}),
                                "occurrences": report["summary"]["occurrences"]},
                     "outputs": {},
                 }
@@ -451,13 +714,69 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._send_json({
                     "ok": True, "sid": sid,
                     "filename": safe_name, "mode": "redact",
+                    "profile": profile, "case_name": case_name,
                     "counts": info["counts"],
                     "looks_redacted": is_redacted,
                     "mapping_found": os.path.exists(sib_mapping),
                     "redirect": f"/workspace?sid={sid}",
                 })
+            except D.PdfTextLayerError as exc:
+                # 扫描件和混合 PDF 不能被误报为“没有敏感信息”。
+                shutil.rmtree(sess_dir, ignore_errors=True)
+                self._send_json({"ok": False, "error": str(exc), "code": "PDF_TEXT_UNREADABLE"}, 400)
             except Exception as exc:
                 self._send_json({"ok": False, "error": f"上传/识别失败：{exc}"}, 500)
+            return
+
+        # ---------------- /api/term/<sid> ----------------
+        m = re.match(r"^/api/term/([A-Za-z0-9_-]+)$", path)
+        if m:
+            info = self.state.get(m.group(1))
+            if not info or info.get("mode") != "redact":
+                self._send_json({"ok": False, "error": "session not found"}, 404)
+                return
+            try:
+                req = json.loads(body_bytes.decode("utf-8") or "{}")
+                case_data = self.state.load_case(info.get("case_name", "")) if info.get("case_name") else info["case_data"]
+                case_terms = list(case_data.get("terms", []))
+                local_terms = list(info.get("local_terms", []))
+                if req.get("action") == "delete":
+                    case_terms = [t for t in case_terms if t.get("id") != req.get("id")]
+                    local_terms = [t for t in local_terms if t.get("id") != req.get("id")]
+                elif req.get("action") == "add":
+                    term = review_ext.validate_term(req.get("term"))
+                    if len(case_terms) + len(local_terms) >= 100:
+                        raise ValueError("每个案件最多 100 个自选字段")
+                    scope = req.get("scope", "case") if info.get("case_name") else "document"
+                    if scope not in ("case", "document"):
+                        raise ValueError("字段范围只能是本文或同案")
+                    if scope == "case":
+                        if any(t.get("id") == term["id"] for t in local_terms):
+                            raise ValueError("该字段已存在于本文，请先删除再添加到同案")
+                        case_terms = [t for t in case_terms if t.get("id") != term["id"]] + [term]
+                    else:
+                        if any(t.get("id") == term["id"] for t in case_terms):
+                            raise ValueError("该字段已存在于同案，请先删除再添加到本文")
+                        local_terms = [t for t in local_terms if t.get("id") != term["id"]] + [term]
+                else:
+                    raise ValueError("不支持的操作")
+                case_data["terms"] = case_terms
+                terms = [dict(t, scope="case") for t in case_terms] + [dict(t, scope="document") for t in local_terms]
+                run = _run_detector(info["input_path"], terms, info.get("profile") == "litigation")
+                report = run["report"]
+                case_data["numbers"], numbers = review_ext.assign_case_numbers(report, case_data.get("numbers", []))
+                self.state.save_case(info.get("case_name", ""), case_data)
+                payload = _build_review_payload(report, run["doc"].blocks, numbers, terms)
+                payload["profile"] = info.get("profile", "contract")
+                payload["case_name"] = info.get("case_name", "")
+                info.update(report=report, doc=run["doc"], full_raw=run["full_raw"],
+                            case_data=case_data, local_terms=local_terms,
+                            case_numbers=numbers, review_payload=payload)
+                self._send_json({"ok": True, "terms": terms})
+            except (ValueError, TypeError, json.JSONDecodeError) as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 400)
+            except Exception as exc:
+                self._send_json({"ok": False, "error": "更新自选字段失败：" + str(exc)}, 500)
             return
 
         # ---------------- /api/apply/<sid> ----------------
@@ -508,6 +827,11 @@ class AppHandler(BaseHTTPRequestHandler):
                     min_confidence=float(req.get("min_confidence", 0.5)),
                     min_severity=req.get("min_severity", "low"),
                     restore_mode=True,
+                    custom_terms=info.get("case_data", {}).get("terms", []) + info.get("local_terms", []),
+                    case_numbers=info.get("case_numbers"),
+                    litigation_profile=info.get("profile") == "litigation",
+                    external_clean=info.get("profile") == "litigation",
+                    rules_path=_rules_path(),
                 )
             except Exception as exc:
                 self._send_json({"ok": False, "error": f"脱敏失败：{exc}"}, 500)
@@ -520,7 +844,6 @@ class AppHandler(BaseHTTPRequestHandler):
             mapping_src = r.get("mapping") or info["mapping_path"]
             mapping_dst = os.path.join(out_dir, output_name + ".mapping.json")
             try:
-                import shutil
                 shutil.copyfile(mapping_src, mapping_dst)
             except Exception:
                 mapping_dst = mapping_src
@@ -530,7 +853,6 @@ class AppHandler(BaseHTTPRequestHandler):
             if r.get("log") and os.path.exists(r["log"]):
                 log_dst = os.path.join(out_dir, output_name + ".redaction.log")
                 try:
-                    import shutil
                     shutil.copyfile(r["log"], log_dst)
                 except Exception:
                     log_dst = None
@@ -557,6 +879,11 @@ class AppHandler(BaseHTTPRequestHandler):
                 self._send_json({"ok": False, "error": "session not found"}, 404)
                 return
 
+            input_path = info["input_path"]
+            ext = _ext_of(input_path)
+            out_dir = os.path.join(self.state.work_dir, sid, "out")
+            os.makedirs(out_dir, exist_ok=True)
+            stem = os.path.splitext(os.path.basename(input_path))[0]
             mapping_path: Optional[str] = None
             restore_kwargs: Dict[str, Any] = {}
             if ctype.startswith("multipart/form-data"):
@@ -577,17 +904,17 @@ class AppHandler(BaseHTTPRequestHandler):
                 if req_mapping:
                     mapping_path = req_mapping
             if not mapping_path:
-                # 自动找
-                sib = info.get("sibling_mapping") or find_sibling_mapping(info["input_path"])
-                if sib and os.path.exists(sib):
-                    mapping_path = sib
+                # 当前会话生成的映射反映复核勾选与手工补录；上传时的映射只是初稿。
+                if info.get("mode") != "restore":
+                    generated = os.path.join(out_dir, f"{stem}_脱敏{ext or '.txt'}.mapping.json")
+                    if os.path.exists(generated):
+                        mapping_path = generated
+                if not mapping_path:
+                    sib = info.get("sibling_mapping") or find_sibling_mapping(info["input_path"])
+                    if sib and os.path.exists(sib):
+                        mapping_path = sib
                 # 注：mapping_path 可能为 None —— restore_file() 会自动尝试 docx 内嵌
 
-            input_path = info["input_path"]
-            ext = _ext_of(input_path)
-            out_dir = os.path.join(self.state.work_dir, sid, "out")
-            os.makedirs(out_dir, exist_ok=True)
-            stem = os.path.splitext(os.path.basename(input_path))[0]
             output_name = f"{stem}_还原{ext or '.txt'}"
             out_path = os.path.join(out_dir, output_name)
 
@@ -627,7 +954,8 @@ class AppHandler(BaseHTTPRequestHandler):
 # --------------------------------------------------------------- 服务启动 ------
 
 
-def _build_review_payload(report: Dict[str, Any], doc_blocks: List[Any]) -> Dict[str, Any]:
+def _build_review_payload(report: Dict[str, Any], doc_blocks: List[Any],
+                          case_numbers=None, terms=None) -> Dict[str, Any]:
     """构造 /review 页所需的 JSON：每段的全文 + 高亮区间 + 占位符预览。
 
     与 detector 的 _build_review_payload 类似，但额外保留 occ 的【全 occurrence 索引】
@@ -637,7 +965,7 @@ def _build_review_payload(report: Dict[str, Any], doc_blocks: List[Any]) -> Dict
     types: Dict[str, Dict[str, Any]] = {}
     # 编号必须与 detector.write_mapping / redactor 完全一致：
     # 同一个实体（同一个人/企业，含简称）在整篇里共用同一个 [标签#N]。
-    numberer = D.EntityNumberer(report["items"])
+    numberer = D.EntityNumberer(report["items"], case_numbers)
     for it in report["items"]:
         t = types.setdefault(it["type"], {
             "id": it["type"], "label": it["label"], "cat": it["category"],
@@ -677,6 +1005,7 @@ def _build_review_payload(report: Dict[str, Any], doc_blocks: List[Any]) -> Dict
         "warnings": report.get("warnings") or [],
         "types": list(types.values()),
         "blocks": blocks,
+        "terms": terms or [],
     }
 
 

@@ -1,5 +1,7 @@
 # cece_legal_skills
 
+> **Fork 候选分支说明**：本分支在 [whatcccup 原仓](https://github.com/whatcccup/cece_legal_skills) `cd4d86a` 基础上准备 WorkBuddy Mac / Windows v1.2.3 候选版。发布范围、安装材料、已通过项目和待验收项目见 [候选版发布说明](001-contract-desensitizer/02-github/WORKBUDDY-v1.2.3-RC.md)。下文的 SkillHub 安装命令仍指向原仓已发布版本，不能据此安装本 fork 候选版。
+
 法务 / 法律场景的**离线小工具**集合：不联网、不上传、可逆，装好就能用。
 
 <p align="center">
