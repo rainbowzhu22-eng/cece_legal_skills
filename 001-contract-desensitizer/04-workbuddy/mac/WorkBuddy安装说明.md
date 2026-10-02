@@ -10,7 +10,7 @@
 
 ## 对方日常使用
 
-具体操作见同目录的《产品使用说明.md》；配有实际操作截图的 PDF 为《法务文书脱敏工具-图文使用说明.pdf》。该 PDF 的界面截图来自旧版，未展示 v1.2.3 的历史记录和调整后的识别类型面板；相关操作以当前页面和 Markdown 使用说明为准。
+具体操作见同目录的《产品使用说明.md》。本候选包未附旧版图文 PDF；界面与步骤以当前应用和这份说明为准。
 
 首次安装需要网络下载 Python 依赖。装好后，双击桌面的 **合同脱敏（WorkBuddy）.app**，浏览器会打开 `http://127.0.0.1:18800/`。也可以在 WorkBuddy 中说“帮我把这份合同脱敏”。若 WorkBuddy 尚未识别新技能，重新打开 WorkBuddy 会话。
 
@@ -20,7 +20,7 @@
 
 ## 包的内容与来源
 
-- `contract-desensitizer-offline/`：WorkBuddy 技能。包含脚本、规则说明和合成数据测试；无真实合同、会话文件或虚拟环境。
+- `contract-desensitizer-offline/`：WorkBuddy 技能。包含运行脚本和规则说明；合成数据测试保存在 fork 的源码仓中。包内无真实合同、会话文件或虚拟环境。
 - `install_macos.sh`：安装技能、独立 Python 环境与桌面入口。若目标位置已有不同版本，会停止而不覆盖。
 - `launcher.applescript`：在目标 Mac 本地生成可双击应用；无本机绝对路径。
 - `LICENSE`：原仓库 MIT 许可。
