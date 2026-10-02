@@ -1,6 +1,6 @@
 # WorkBuddy Mac / Windows v1.2.3 候选版发布准备
 
-**状态：仅供审阅的候选分支；未创建 GitHub Release，未发布 SkillHub，现有 ZIP 不可公开上传。** 建议候选标签 `v1.2.3-rc.1`，待文档脱敏重建、Windows 实机与最终质量门槛通过后再决定正式版本。
+**状态：Mac v1.2.3 单平台发布准备完成；Windows 仍为候选，未发布 SkillHub。** Mac 发布范围和限制见 [Mac 发布说明](WORKBUDDY-MAC-v1.2.3-RELEASE.md)。本页其余旧候选包信息仅供追溯。
 
 ## 来源与范围
 
@@ -21,7 +21,7 @@
 
 | 文件 | SHA-256 | 状态 |
 | --- | --- | --- |
-| 新 `合同脱敏-WorkBuddy-Mac-v1.2.3-候选.zip` | `44c4ffded3eebad3587b2fa637bcbef82c09383a526fb32ec6c549345dd6b9dd` | 已从修正后的源码重建；不含旧截图 PDF、真实文书、会话及缓存。可供 Mac 候选验收，尚非正式 Release |
+| `合同脱敏-WorkBuddy-Mac-v1.2.3-候选.zip` | `44c4ffded3eebad3587b2fa637bcbef82c09383a526fb32ec6c549345dd6b9dd` | Mac 先行验收包；后续以正式资产的新 SHA-256 为准 |
 | 旧 `合同脱敏-WorkBuddy-Mac-v1.2.3-候选.zip` | `87ef1b90185a055516d2266da6b49a51c2fee589032182fa86a85dc8456cc77a` | 旧说明含用户截图中的主体示例；仅作内部历史校验，不可公开上传 |
 | `合同脱敏-WorkBuddy-Windows-v1.2.3-候选.zip` | `b77b1955431bedd608ba2e70493a547265c07f08cb76210a46dcc50c71f1ad8d` | 同上，且 Windows 实机尚未验收；不可公开上传 |
 | 新 Windows ZIP | 待重建后填写 | 仅在内容检查和相应验收完成后附加到 Release |
@@ -31,10 +31,11 @@ ZIP 不进入 Git 历史。公开 fork 的文字说明已把来自用户截图�
 ## 已有证据与待完成门槛
 
 - 已完成：两个 ZIP 的完整性、共用脚本逐字节一致、版本号与安装构建号、排除虚拟环境/会话/缓存检查；Mac 正式 WorkBuddy 技能目录安装、技能列表启用、桌面入口启动；真实 6 页盖章扫描协议与混合 PDF 均安全阻断；虚构 DOCX 补录、导出、还原及重启后历史；相关定向回归。
-- 待完成：重建 Windows ZIP 并完成内容检查；真实 Windows WorkBuddy 安装和全链路验收；真实文字型法律文书的逐处识别准确性核对；浏览器全矩阵及最终全量回归。完成前不得称“正式发布”或承诺扫描 PDF 脱敏。
+- Mac 已补齐：7 个 Python 文件、1 个 JS 文件的一次完整回归；合成文书的浏览器上传、补录、导出、还原、历史与扫描 PDF 阻断流程。真实文字型法律文书逐处准确性核对未完成，已在 Mac 发布说明中标明限制。
+- Windows 待完成：重建 ZIP 并检查内容；真实 Windows WorkBuddy 安装和全链路验收。扫描 PDF 脱敏不属于 v1.2.3。
 
-## 发布动作（当前均未执行）
+## Windows 后续发布动作
 
-1. 完成公开内容检查与上述待验收项并记录结论；从已核定的材料重新构建、重算 SHA-256。
-2. 从本候选分支的已验证提交创建标签；GitHub Release 附加 Mac ZIP、Windows ZIP、SHA-256 清单，说明平台差异与已知限制。
-3. 只有确认 SkillHub 发布范围、版本和打包规则后，才单独更新 `03-skillhub/` 并发布；本次 GitHub fork 准备不代表 SkillHub 更新。
+1. 完成 Windows 实机验收与公开内容检查；从已核定的材料重新构建 Windows ZIP、重算 SHA-256。
+2. Windows 通过发布门槛后单独附加或发布 Windows 安装资产，明确与 Mac 已发布版本的关系。
+3. SkillHub 仍需另行确认发布范围、版本和打包规则；GitHub fork 的 Mac 发布不代表 SkillHub 更新。

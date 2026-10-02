@@ -29,9 +29,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import contract_app_server as S  # noqa: E402
 from docx import Document  # noqa: E402
 
-C01 = ("/Users/agent/Downloads/Contract_Copilot_全部实测用例与问题汇总_20260831/"
-       "02_测试材料/C01/input.docx")
-
 fails = []
 
 
@@ -85,13 +82,13 @@ def kept_sample(rv, mark):
 
 
 def main():
-    if not os.path.exists(C01):
-        print(f"跳过：找不到样例 {C01}")
-        return 0
-
     tmp = tempfile.mkdtemp(prefix="out_dl_")
     src = os.path.join(tmp, "input.docx")
-    shutil.copyfile(C01, src)
+    sample = Document()
+    sample.add_paragraph("甲方：北京星海智能科技有限公司，法定代表人：张三。")
+    sample.add_paragraph("乙方联系人：李四，电话：13800138000。张三和李四确认本协议。")
+    sample.save(src)
+    print("使用内置虚构 DOCX 样本")
     host, port = "127.0.0.1", 18893
     base = f"http://{host}:{port}"
     srv = S.start_app_server(host, port, os.path.join(tmp, "sessions"))
@@ -123,6 +120,7 @@ def main():
             if os.path.exists(cand):
                 node = cand
                 break
+        node = node or shutil.which("node")
         if node:
             rc = os.system(f'"{node}" --check "{tmp}/review.js" > "{tmp}/node.log" 2>&1')
             check("页面 JS 语法检查通过", rc == 0,
